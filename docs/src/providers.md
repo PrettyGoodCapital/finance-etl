@@ -12,8 +12,36 @@ The current public provider surface covers Massive REST workflows for:
 - date and symbol daily aggregate request planning
 - daily aggregate HTTP requests
 - session-date planning for US stock market data
+- daily ticker summary explain plans with dataset/provider metadata, unit identities, and redacted HTTP requests
 
 The provider models build on the generic `ccflow-http` request machinery. They do not install package-specific workflow CLIs and do not hard-code storage destinations.
+
+`MassiveDailyTickerSummaryModel` is the first public composition model. It uses `ccflow-etl` dataset/provider contracts, `ccflow-http` request models, and stable unit identities. In explain mode it does not require credentials and does not call Massive; live execution still requires `MASSIVE_API_KEY`.
+
+Downstream normalization belongs in `finance-flow`, which already owns Massive-shaped daily-bar normalization contracts.
+
+## Catalogs
+
+Compose Massive dataset and provider catalogs with:
+
+```yaml
+defaults:
+  - /credentials: massive
+  - /datasets: massive
+  - /providers: massive
+  - _self_
+
+hydra:
+  searchpath:
+    - pkg://finance_etl.config
+```
+
+The catalog registers:
+
+| Registry Path                            | Purpose                                                                                  |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `/datasets/massive_daily_ticker_summary` | Dataset definition for the semantic dataset `massive-daily-ticker-summary`.              |
+| `/providers/massive`                     | Massive REST provider definition, credential reference, retry hints, and request shapes. |
 
 ## Credentials
 

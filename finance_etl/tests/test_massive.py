@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from ccflow_etl import APIKeySecretCredentials
+from ccflow_etl import APIKeySecretCredentials, DatasetDefinition, ProviderDefinition
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 
@@ -16,6 +16,7 @@ from finance_etl.providers.massive import (
     MarketCalendarModel,
     MarketHolidaysModel,
     MassiveCredentials,
+    MassiveDailyTickerSummaryModel,
     TickersContext,
     TickersModel,
     TickerUniversePlanContext,
@@ -54,6 +55,36 @@ hydra:
     assert isinstance(flat_file_credentials, APIKeySecretCredentials)
     assert flat_file_credentials.api_key_env == "MASSIVE_API_KEY_ID"
     assert flat_file_credentials.secret_key_env == "MASSIVE_API_KEY"
+
+
+def test_massive_catalog_configs_register_dataset_and_provider(tmp_path):
+    (tmp_path / "runner.yaml").write_text(
+        """
+defaults:
+    - _self_
+    - credentials: massive
+    - datasets: massive
+    - providers: massive
+
+hydra:
+    searchpath:
+        - pkg://finance_etl.config
+""".lstrip()
+    )
+
+    with initialize_config_dir(config_dir=str(tmp_path), version_base=None):
+        cfg = compose(config_name="runner")
+
+    dataset = instantiate(cfg.datasets.massive_daily_ticker_summary)
+    provider = instantiate(cfg.providers.massive)
+
+    assert isinstance(dataset, DatasetDefinition)
+    assert dataset.name == "massive-daily-ticker-summary"
+    assert dataset.partition_keys == ["date", "ticker"]
+    assert isinstance(provider, ProviderDefinition)
+    assert provider.name == "massive"
+    assert provider.dataset_refs == ["/datasets/massive_daily_ticker_summary"]
+    assert provider.credentials_ref == "/credentials/massive"
 
 
 def test_massive_market_metadata_models_build_expected_requests(monkeypatch):
@@ -208,6 +239,24 @@ def test_massive_ticker_universe_plan_builds_date_specific_requests(monkeypatch)
         {"market": "stocks", "active": True, "limit": 1000, "date": "2024-01-02", "apiKey": "secret"},
         {"market": "stocks", "active": True, "limit": 1000, "date": "2024-01-03", "apiKey": "secret"},
     ]
+
+
+def test_massive_daily_ticker_summary_explain_includes_catalog_and_unit_identity(monkeypatch):
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+
+    payload = MassiveDailyTickerSummaryModel(tickers=["AAPL"], calendar="/calendars/nyse", explain=True, destination="s3")(["2025-01-02"]).value
+
+    assert payload["dataset"] == "massive-daily-ticker-summary"
+    assert payload["provider"] == "massive"
+    assert payload["will_call_network"] is False
+    assert payload["dataset_definition"]["partition_keys"] == ["date", "ticker"]
+    assert payload["provider_definition"]["credentials_ref"] == "/credentials/massive"
+    assert payload["provider_definition"]["retry"]["retry_status_codes"] == [429, 500, 502, 503, 504]
+    assert payload["unit_identities"][0]["partition"] == {"date": "2025-01-02", "ticker": "AAPL"}
+    assert payload["unit_identities"][0]["key"].startswith("units/massive/massive-daily-ticker-summary/schema=1/transform=raw/destination=s3/")
+    assert payload["base_models"]["http"] == "ccflow_http.HTTPModel"
+    assert "ccflow_s3.S3CacheStore" in payload["base_models"]["storage"]
+    assert [request["url"] for request in payload["requests"]] == ["/v2/aggs/ticker/AAPL/range/1/day/2025-01-02/2025-01-02"]
 
 
 def test_massive_tickers_model_paginates_next_url(monkeypatch):

@@ -48,6 +48,18 @@ defaults:
 
 The packaged credential config reads secrets from environment variables; it does not store secrets in public package config.
 
+Massive also publishes reusable dataset and provider catalog entries:
+
+```yaml
+defaults:
+    - /credentials: massive
+    - /datasets: massive
+    - /providers: massive
+    - _self_
+```
+
+The catalog registers the Hydra-friendly key `datasets.massive_daily_ticker_summary` for the semantic dataset `massive-daily-ticker-summary`, plus `providers.massive` for Massive REST request planning. Applications can compose those objects into `MassiveDailyTickerSummaryModel` and keep destinations or production overlays private.
+
 ## Documentation
 
 - [Calendars](docs/src/calendars.md)

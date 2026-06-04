@@ -30,7 +30,10 @@ classifiers = [
 ]
 
 dependencies = [
-  "finance-flow",
+    "ccflow>=0.6.10",
+    "ccflow-etl>=0.1.1",
+    "ccflow-http",
+    "finance-dates",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +55,9 @@ develop = [
 ]
 
 [project.scripts]
+
+[project.entry-points."hydra.lernaplugins"]
+finance-etl = "pkg:finance_etl.config"
 
 [project.urls]
 Repository = "https://github.com/PrettyGoodCapital/finance-etl"
@@ -140,3 +146,21 @@ section-order = [
     "F401",
     "F403",
 ]
+
+[tool.yardang]
+title = "finance-etl"
+root = "README.md"
+pages = [
+    "docs/src/calendars.md",
+    "docs/src/providers.md",
+    "docs/src/development.md",
+    "docs/src/api.md",
+]
+use-autoapi = false
+autodoc-pydantic-field-list-validators = false
+autodoc-pydantic-field-show-constraints = false
+autodoc-pydantic-model-show-config-summary = false
+autodoc-pydantic-model-show-field-summary = false
+autodoc-pydantic-model-show-validator-members = false
+autodoc-pydantic-model-show-validator-summary = false
+autodoc-pydantic-settings-show-json = false

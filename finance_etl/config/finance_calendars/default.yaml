@@ -1,0 +1,88 @@
+# @package calendars
+
+nyse:
+  _target_: finance_etl.ExchangeCalendar
+  code: XNYS
+
+nasdaq:
+  _target_: finance_etl.ExchangeCalendar
+  code: XNAS
+
+lse:
+  _target_: finance_etl.ExchangeCalendar
+  code: XLON
+
+tokyo:
+  _target_: finance_etl.ExchangeCalendar
+  code: XTKS
+
+hong_kong:
+  _target_: finance_etl.ExchangeCalendar
+  code: XHKG
+
+us:
+  _target_: finance_etl.CountryCalendar
+  code: US
+
+japan:
+  _target_: finance_etl.CountryCalendar
+  code: JP
+
+brazil:
+  _target_: finance_etl.CountryCalendar
+  code: BR
+
+korea:
+  _target_: finance_etl.CountryCalendar
+  code: KR
+
+exchange:
+  _target_: finance_etl.ExchangeCalendarRegistry
+
+country:
+  _target_: finance_etl.CountryCalendarRegistry
+
+region:
+  _target_: finance_etl.CountryCalendarRegistry
+  name: region
+
+trading_days:
+  _target_: finance_etl.ExchangeCalendar
+  code: XNYS
+
+non_trading_days:
+  _target_: finance_etl.ExchangeNonTradingDaysCalendar
+  code: XNYS
+
+trading_session_hours:
+  _target_: finance_etl.ExchangeSessionIntervalCalendar
+  code: XNYS
+  minutes: 60
+
+trading_session_30_minutes:
+  _target_: finance_etl.ExchangeSessionIntervalCalendar
+  code: XNYS
+  minutes: 30
+
+trading_session_15_minutes:
+  _target_: finance_etl.ExchangeSessionIntervalCalendar
+  code: XNYS
+  minutes: 15
+
+trading_session_5_minutes:
+  _target_: finance_etl.ExchangeSessionIntervalCalendar
+  code: XNYS
+  minutes: 5
+
+trading_session_1_minute:
+  _target_: finance_etl.ExchangeSessionIntervalCalendar
+  code: XNYS
+  minutes: 1
+
+trading_session_starts:
+  _target_: finance_etl.ExchangeSessionStartCalendar
+  code: XNYS
+
+trading_session_ends:
+  _target_: finance_etl.ExchangeSessionEndCalendar
+  code: XNYS

@@ -11,7 +11,7 @@ Standard financial ETL workflows
 
 `finance-etl` provides reusable finance-specific ETL adapters on top of `ccflow` and the generic `ccflow-*` connector packages. It owns public finance data access concerns such as trading calendars, market sessions, provider request planning, credential config shapes, and finance-aware backfill helpers.
 
-Applications compose these adapters into workflows and decide where data is stored. Provider credentials, private paths, and deployment-specific destinations stay outside this package.
+Applications compose these adapters into workflows and decide where data is stored. Provider credentials, private paths, and deployment-specific output stores stay outside this package.
 
 ## Quick Start
 
@@ -48,17 +48,18 @@ defaults:
 
 The packaged credential config reads secrets from environment variables; it does not store secrets in public package config.
 
-Massive also publishes reusable dataset and provider catalog entries:
+Massive also publishes a reusable dataset config:
 
 ```yaml
 defaults:
-    - /credentials: massive
-    - /datasets: massive
-    - /providers: massive
+    - /credentials: /credentials/providers/massive/rest
+    - dataset: /datasets/massive/stocks/rest/ticker-summary
     - _self_
 ```
 
-The catalog registers the Hydra-friendly key `datasets.massive_daily_ticker_summary` for the semantic dataset `massive-daily-ticker-summary`, plus `providers.massive` for Massive REST request planning. Applications can compose those objects into `MassiveDailyTickerSummaryModel` and keep destinations or production overlays private.
+The config selects `MassiveDailyTickerSummaryModel` for the semantic dataset `massive-daily-ticker-summary`. Provider and schema metadata live on that concrete model. Applications can select `dataset=/datasets/massive/stocks/rest/ticker-summary` and run it through generic tasks such as `task=/tasks/extract`.
+
+`MassiveDailyTickerSummaryModel` accepts an optional generic `ccflow-etl` `ArtifactWriteModel`. Explain runs emit output keys and planned writes without provider I/O; live runs can write raw provider payloads through the configured artifact store.
 
 ## Documentation
 
@@ -70,7 +71,7 @@ The catalog registers the Hydra-friendly key `datasets.massive_daily_ticker_summ
 ## Dependency Contract
 
 - May depend on `ccflow`, `ccflow-etl`, `ccflow-http`, `ccflow-s3`, `finance-dates`, and `finance-flow`.
-- Should keep provider credentials and deployment-specific storage destinations out of package code.
+- Should keep provider credentials and deployment-specific storage outputs out of package code.
 - Must not depend on application-specific packages.
 
 ## Test Convention

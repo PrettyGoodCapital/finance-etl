@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from datetime import date
 
-from ccflow_etl import APIKeySecretCredentials, DatasetDefinition, ProviderDefinition
+import pyarrow.parquet as pq
+from ccflow import Flow, GenericResult
+from ccflow_etl import (
+    APIKeySecretCredentials,
+    ArtifactWriteModel,
+    LocalFileOutput,
+    NoOpArtifactStore,
+)
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 
@@ -15,8 +22,11 @@ from finance_etl.providers.massive import (
     MarketCalendarContext,
     MarketCalendarModel,
     MarketHolidaysModel,
+    MassiveAllStocksDailySummaryModel,
     MassiveCredentials,
+    MassiveDailyTickerSummaryContext,
     MassiveDailyTickerSummaryModel,
+    MassiveFlatFileTransferModel,
     TickersContext,
     TickersModel,
     TickerUniversePlanContext,
@@ -56,15 +66,11 @@ hydra:
     assert flat_file_credentials.api_key_env == "MASSIVE_API_KEY_ID"
     assert flat_file_credentials.secret_key_env == "MASSIVE_API_KEY"
 
-
-def test_massive_catalog_configs_register_dataset_and_provider(tmp_path):
-    (tmp_path / "runner.yaml").write_text(
+    (tmp_path / "indexed.yaml").write_text(
         """
 defaults:
     - _self_
-    - credentials: massive
-    - datasets: massive
-    - providers: massive
+    - credentials: /credentials/providers/massive/rest
 
 hydra:
     searchpath:
@@ -73,18 +79,9 @@ hydra:
     )
 
     with initialize_config_dir(config_dir=str(tmp_path), version_base=None):
-        cfg = compose(config_name="runner")
+        indexed_cfg = compose(config_name="indexed")
 
-    dataset = instantiate(cfg.datasets.massive_daily_ticker_summary)
-    provider = instantiate(cfg.providers.massive)
-
-    assert isinstance(dataset, DatasetDefinition)
-    assert dataset.name == "massive-daily-ticker-summary"
-    assert dataset.partition_keys == ["date", "ticker"]
-    assert isinstance(provider, ProviderDefinition)
-    assert provider.name == "massive"
-    assert provider.dataset_refs == ["/datasets/massive_daily_ticker_summary"]
-    assert provider.credentials_ref == "/credentials/massive"
+    assert isinstance(instantiate(indexed_cfg.credentials.providers.massive.rest), MassiveCredentials)
 
 
 def test_massive_market_metadata_models_build_expected_requests(monkeypatch):
@@ -241,22 +238,151 @@ def test_massive_ticker_universe_plan_builds_date_specific_requests(monkeypatch)
     ]
 
 
-def test_massive_daily_ticker_summary_explain_includes_catalog_and_unit_identity(monkeypatch):
+def test_massive_daily_ticker_summary_explain_includes_metadata_and_requests(monkeypatch):
     monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
 
-    payload = MassiveDailyTickerSummaryModel(tickers=["AAPL"], calendar="/calendars/nyse", explain=True, destination="s3")(["2025-01-02"]).value
+    payload = MassiveDailyTickerSummaryModel(tickers=["AAPL"], calendar="/calendars/exchange/NYSE", explain=True)(["2025-01-02"]).value
 
     assert payload["dataset"] == "massive-daily-ticker-summary"
     assert payload["provider"] == "massive"
     assert payload["will_call_network"] is False
-    assert payload["dataset_definition"]["partition_keys"] == ["date", "ticker"]
-    assert payload["provider_definition"]["credentials_ref"] == "/credentials/massive"
-    assert payload["provider_definition"]["retry"]["retry_status_codes"] == [429, 500, 502, 503, 504]
-    assert payload["unit_identities"][0]["partition"] == {"date": "2025-01-02", "ticker": "AAPL"}
-    assert payload["unit_identities"][0]["key"].startswith("units/massive/massive-daily-ticker-summary/schema=1/transform=raw/destination=s3/")
+    assert payload["dataset_metadata"]["partition_keys"] == ["date", "ticker"]
+    assert payload["provider_metadata"]["retry"]["retry_status_codes"] == [429, 500, 502, 503, 504]
     assert payload["base_models"]["http"] == "ccflow_http.HTTPModel"
     assert "ccflow_s3.S3CacheStore" in payload["base_models"]["storage"]
     assert [request["url"] for request in payload["requests"]] == ["/v2/aggs/ticker/AAPL/range/1/day/2025-01-02/2025-01-02"]
+    assert payload["output_keys"] == ["massive/stocks/rest/ticker-summary/json/2025-01-02/AAPL.json"]
+
+
+def test_massive_daily_ticker_summary_explain_plans_output_writes(monkeypatch):
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+
+    payload = MassiveDailyTickerSummaryModel(
+        tickers=["AAPL"],
+        explain=True,
+        artifact_writer=ArtifactWriteModel(store=NoOpArtifactStore()),
+    )(["2025-01-02"]).value
+
+    assert payload["output_writes"][0]["status"] == "planned"
+    assert payload["output_writes"][0]["artifact"]["uri"] == "noop://artifact/massive/stocks/rest/ticker-summary/json/2025-01-02/AAPL.json"
+
+
+def test_massive_daily_ticker_summary_can_plan_parquet_return_type(monkeypatch):
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+
+    payload = MassiveDailyTickerSummaryModel(tickers=["AAPL"], explain=True, return_type="parquet")(["2025-01-02"]).value
+
+    assert payload["return_type"] == "parquet"
+    assert payload["output_keys"] == ["massive/stocks/rest/ticker-summary/parquet/2025-01-02/AAPL.parquet"]
+
+
+def test_massive_daily_ticker_summary_artifact_writer_materializes_parquet_return_type(tmp_path):
+    model = MassiveDailyTickerSummaryModel(
+        tickers=["AAPL"],
+        return_type="parquet",
+        artifact_writer=ArtifactWriteModel(store=LocalFileOutput(path=tmp_path)),
+    )
+
+    results = model._write_outputs(
+        MassiveDailyTickerSummaryContext(date="2025-01-02"),
+        [{"ticker": "AAPL", "close": 42}],
+    )
+
+    output_path = tmp_path / "massive" / "stocks" / "rest" / "ticker-summary" / "parquet" / "2025-01-02" / "AAPL.parquet"
+
+    assert results[0].status == "written"
+    assert pq.read_table(output_path).to_pylist() == [{"ticker": "AAPL", "close": 42}]
+
+
+def test_massive_flat_file_transfer_explain_plans_stock_source_and_output():
+    payload = MassiveFlatFileTransferModel(dataset="trades", output=NoOpArtifactStore(), explain=True)(["2025-11-05"]).value
+
+    assert payload["dataset"] == "massive-stocks-flat-files-trades"
+    assert payload["source_key"] == "us_stocks_sip/trades_v1/2025/11/2025-11-05.csv.gz"
+    assert payload["source_uri"] == "s3://flatfiles/us_stocks_sip/trades_v1/2025/11/2025-11-05.csv.gz"
+    assert payload["output_key"] == "massive/stocks/flat-files/trades/2025/11/2025-11-05.csv.gz"
+    assert payload["will_download"] is False
+    assert payload["output_writes"][0]["status"] == "planned"
+    assert payload["required_env"] == ["MASSIVE_API_KEY_ID", "MASSIVE_API_KEY"]
+
+
+def test_massive_flat_file_transfer_downloads_and_writes_output(tmp_path):
+    class FakeBody:
+        def read(self):
+            return b"csv-gzip-bytes"
+
+    class FakeSourceClient:
+        def __init__(self):
+            self.calls = []
+
+        def get_object(self, Bucket, Key):
+            self.calls.append({"Bucket": Bucket, "Key": Key})
+            return {"Body": FakeBody()}
+
+    class FakeOutput:
+        def __init__(self):
+            self.writes = []
+
+        def artifact_uri(self, key):
+            return f"s3://shared/{key}"
+
+        def exists(self, key):
+            return False
+
+        def write_file(self, key, path, media_type=None, metadata=None):
+            self.writes.append({"key": key, "body": path.read_bytes(), "media_type": media_type, "metadata": metadata})
+            return {"status": "written", "object": key}
+
+    source_client = FakeSourceClient()
+    output = FakeOutput()
+    model = MassiveFlatFileTransferModel(dataset="quotes", source_client=source_client, output=output, local_dir=tmp_path)
+
+    payload = model(["2025-11-05"]).value
+
+    assert payload["status"] == "written"
+    assert source_client.calls == [{"Bucket": "flatfiles", "Key": "us_stocks_sip/quotes_v1/2025/11/2025-11-05.csv.gz"}]
+    assert output.writes[0]["key"] == "massive/stocks/flat-files/quotes/2025/11/2025-11-05.csv.gz"
+    assert output.writes[0]["body"] == b"csv-gzip-bytes"
+    assert output.writes[0]["media_type"] == "application/gzip"
+
+
+def test_massive_all_stocks_daily_summary_explain_plans_ticker_universe_request(monkeypatch):
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+
+    payload = MassiveAllStocksDailySummaryModel(explain=True)(["2025-01-02"]).value
+
+    assert payload["dataset"] == "massive-all-stocks-daily-ticker-summary"
+    assert payload["status"] == "planned"
+    assert payload["ticker_universe_request"]["url"] == "/v3/reference/tickers"
+    assert payload["ticker_universe_request"]["params"] == {"market": "stocks", "active": True, "limit": 1000, "date": "2025-01-02"}
+    assert payload["summary_dataset_metadata"]["name"] == "massive-daily-ticker-summary"
+
+
+def test_massive_all_stocks_daily_summary_composes_ticker_and_daily_models(monkeypatch):
+    class FakeTickersModel:
+        def build_request(self, context):
+            return TickersModel().build_request(context)
+
+        def __call__(self, context):
+            return GenericResult(value={"results": [{"ticker": "AAA"}, {"ticker": "BBB"}]})
+
+    class FakeDailyModel(DailyAggregateModel):
+        @Flow.call
+        def __call__(self, context):
+            return {"value": {"ticker": context.ticker, "date": context.date.isoformat()}, "status_code": 200}
+
+    monkeypatch.setenv("MASSIVE_API_KEY", "secret")
+    model = MassiveAllStocksDailySummaryModel(
+        tickers_model=FakeTickersModel(),
+        summary_model=MassiveDailyTickerSummaryModel(daily_model=FakeDailyModel()),
+        max_tickers=1,
+    )
+
+    payload = model(["2025-01-02"]).value
+
+    assert payload["ticker_count"] == 1
+    assert payload["tickers"] == ["AAA"]
+    assert payload["summary"]["results"][0]["value"] == {"ticker": "AAA", "date": "2025-01-02"}
 
 
 def test_massive_tickers_model_paginates_next_url(monkeypatch):

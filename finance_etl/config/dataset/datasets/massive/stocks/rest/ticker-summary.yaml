@@ -1,0 +1,11 @@
+# @package dataset
+
+_target_: finance_etl.MassiveDailyTickerSummaryModel
+calendar: ${calendar}
+artifact_writer: null
+tickers:
+  - SPY
+explain: false
+daily_model:
+  _target_: finance_etl.DailyAggregateModel
+  credentials: ${credentials.providers.massive.rest}

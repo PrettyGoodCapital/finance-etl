@@ -174,6 +174,7 @@ def test_finance_calendar_config_registers_exhaustive_code_namespaces(tmp_path):
     assert region_registry.supported_codes == tuple(dict.fromkeys((*COUNTRY_CODES, *COUNTRY_CODES3)))
 
     assert root["/calendars/exchange/XNYS"].code == "XNYS"
+    assert root["/calendars/exchange/NYSE"].code == "XNYS"
     assert root["/calendars/exchange/xlon"].code == "XLON"
     assert root["/calendars/region/us"].code == "US"
     assert root["/calendars/country/JP"].code == "JP"

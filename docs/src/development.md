@@ -23,12 +23,12 @@ Good fits for this package include:
 - provider-neutral finance context and result models
 - provider request planners and reusable provider adapters
 - provider credential config groups without secrets
-- dataset catalogs and partition planners
+- dataset configs and partition planners
 - finance-aware validation before extraction or loading
 
 ## What Belongs Elsewhere
 
-Generic execution, retry, cache, checkpoint, codec, and handoff behavior belongs in `ccflow-etl` or connector packages. Research workflow composition belongs in `finance-flow`. Private application assembly belongs in downstream packages.
+Generic execution, retry, cache, codec, and handoff behavior belongs in `ccflow-etl` or connector packages. Generic checkpointing belongs in `ccflow`. Research workflow composition belongs in `finance-flow`. Private application assembly belongs in downstream packages.
 
 ## Test Convention
 

@@ -24,6 +24,14 @@ __all__ = (
 _EXCHANGE_CODE_SET = frozenset(EXCHANGE_CODES)
 _COUNTRY_CODE_SET = frozenset((*COUNTRY_CODES, *COUNTRY_CODES3))
 _COUNTRY_CODES = tuple(dict.fromkeys((*COUNTRY_CODES, *COUNTRY_CODES3)))
+_EXCHANGE_ALIASES = {
+    "NYSE": "XNYS",
+    "NASDAQ": "XNAS",
+    "LSE": "XLON",
+    "TSE": "XTKS",
+    "TOKYO": "XTKS",
+    "HKEX": "XHKG",
+}
 
 _EXCHANGE_SESSION_VARIANTS = {
     "trading_days": ("trading_days", None),
@@ -57,7 +65,8 @@ _EXCHANGE_SESSION_VARIANTS = {
 
 
 def _normalize_code(value: str) -> str:
-    return value.upper().replace("-", "_")
+    normalized = value.upper().replace("-", "_")
+    return _EXCHANGE_ALIASES.get(normalized, normalized)
 
 
 def _split_registry_item(item: str) -> tuple[str, str | None]:

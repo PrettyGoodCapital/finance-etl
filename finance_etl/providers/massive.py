@@ -1,9 +1,17 @@
 import os
 from datetime import date, datetime, time, timedelta
-from typing import Any, Dict, List, Optional, Type
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Type
 
 from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, ResultType
-from ccflow_etl import APITokenCredentials, BackfillContext, DatasetDefinition, ETLUnitIdentity, ProviderDefinition
+from ccflow_etl import (
+    APITokenCredentials,
+    ArtifactWriteContext,
+    ArtifactWriteModel,
+    BackfillContext,
+    ETLArtifact,
+    PayloadCodec,
+)
 from ccflow_http import HTTPModel, HTTPRequest, HTTPRequestContext, safe_request_dump
 from pydantic import Field, model_validator
 
@@ -85,6 +93,7 @@ __all__ = (
     "MarketCalendarContext",
     "DailyAggregateContext",
     "MassiveDailyTickerSummaryContext",
+    "MassiveFlatFileContext",
     "DailyAggregateBackfillContext",
     "DailyAggregateBackfillModel",
     "MassiveCredentials",
@@ -100,7 +109,30 @@ __all__ = (
     "StockDataPlanModel",
     "DailyAggregateModel",
     "MassiveDailyTickerSummaryModel",
+    "MassiveAllStocksDailySummaryModel",
+    "MassiveFlatFileTransferModel",
 )
+
+MassiveStockFlatFileDataset = Literal["day-aggs", "minute-aggs", "trades", "quotes"]
+
+_MASSIVE_STOCK_FLAT_FILES: Dict[MassiveStockFlatFileDataset, Dict[str, str]] = {
+    "day-aggs": {
+        "path": "us_stocks_sip/day_aggs_v1",
+        "description": "Daily aggregate OHLCV CSV gzip flat file for all U.S. equities.",
+    },
+    "minute-aggs": {
+        "path": "us_stocks_sip/minute_aggs_v1",
+        "description": "Minute aggregate OHLCV CSV gzip flat file for all U.S. equities.",
+    },
+    "trades": {
+        "path": "us_stocks_sip/trades_v1",
+        "description": "Tick-level trade CSV gzip flat file for all U.S. equities.",
+    },
+    "quotes": {
+        "path": "us_stocks_sip/quotes_v1",
+        "description": "Top-of-book quote CSV gzip flat file for all U.S. equities.",
+    },
+}
 
 
 class MassiveCredentials(APITokenCredentials):
@@ -130,6 +162,17 @@ class DailyAggregateContext(MassiveRequestContext, DateContext):
 
 
 class MassiveDailyTickerSummaryContext(DateContext):
+    @model_validator(mode="wrap")
+    @classmethod
+    def validate_date_only_context(cls, value, handler, info):
+        if not isinstance(value, (cls, dict)):
+            if isinstance(value, (tuple, list)) and len(value) == 1:
+                value = value[0]
+            value = {"date": value}
+        return handler(value)
+
+
+class MassiveFlatFileContext(DateContext):
     @model_validator(mode="wrap")
     @classmethod
     def validate_date_only_context(cls, value, handler, info):
@@ -426,44 +469,36 @@ class StockDataPlanModel(CallableModel):
         return self.plan_requests(context)
 
 
-def _massive_daily_ticker_summary_dataset() -> DatasetDefinition:
-    return DatasetDefinition(
-        name="massive-daily-ticker-summary",
-        description="Massive daily aggregate payloads for configured stock tickers.",
-        schema_name="massive_daily_aggregate_response",
-        schema_version="1",
-        partition_keys=["date", "ticker"],
-        cadence="1D",
-        media_types=["application/json"],
-        quality_expectations=["one payload per ticker/date", "provider response status is OK"],
-        destination_hints={"raw_prefix": "massive/daily-ticker-summary/raw/{date}/{ticker}.json"},
-    )
-
-
-def _massive_provider_definition() -> ProviderDefinition:
-    return ProviderDefinition(
-        name="massive",
-        description="Massive REST market-data provider.",
-        provider_type="http",
-        dataset_refs=["/datasets/massive_daily_ticker_summary"],
-        credentials_ref="/credentials/massive",
-        capabilities=["templated_http_requests", "pagination", "http_status_retry", "rate_limit_headers"],
-        rate_limit={"source": "provider_headers"},
-        retry={"retry_status_codes": [429, 500, 502, 503, 504]},
-        request_templates={"daily_aggregate": "/v2/aggs/ticker/{ticker}/range/1/day/{date}/{date}"},
-    )
-
-
 class MassiveDailyTickerSummaryModel(CallableModel):
     daily_model: DailyAggregateModel = Field(default_factory=DailyAggregateModel)
-    dataset: DatasetDefinition = Field(default_factory=_massive_daily_ticker_summary_dataset)
-    provider: ProviderDefinition = Field(default_factory=_massive_provider_definition)
+    artifact_writer: Optional[ArtifactWriteModel] = None
     tickers: List[str] = Field(default_factory=lambda: ["SPY"])
-    calendar: str = "/calendars/nyse"
+    calendar: str = "/calendars/exchange/NYSE"
     adjusted: bool = True
     explain: bool = False
-    destination: str = "unconfigured"
     transform_version: str = "raw"
+    return_type: str = "json"
+    dataset_name: str = "massive-daily-ticker-summary"
+    dataset_description: str = "Massive daily aggregate payloads for configured stock tickers."
+    schema_name: str = "massive_daily_aggregate_response"
+    schema_version: str = "1"
+    partition_keys: List[str] = Field(default_factory=lambda: ["date", "ticker"])
+    cadence: str = "1D"
+    media_types: List[str] = Field(default_factory=lambda: ["application/json"])
+    quality_expectations: List[str] = Field(default_factory=lambda: ["one payload per ticker/date", "provider response status is OK"])
+    output_hints: Dict[str, Any] = Field(
+        default_factory=lambda: {"raw_prefix": "massive/stocks/rest/ticker-summary/{return_type}/{date}/{ticker}.{extension}"}
+    )
+    provider_name: str = "massive"
+    provider_type: str = "http"
+    provider_capabilities: List[str] = Field(
+        default_factory=lambda: ["templated_http_requests", "pagination", "http_status_retry", "rate_limit_headers"]
+    )
+    provider_rate_limit: Dict[str, Any] = Field(default_factory=lambda: {"source": "provider_headers"})
+    provider_retry: Dict[str, Any] = Field(default_factory=lambda: {"retry_status_codes": [429, 500, 502, 503, 504]})
+    provider_request_templates: Dict[str, Any] = Field(
+        default_factory=lambda: {"daily_aggregate": "/v2/aggs/ticker/{ticker}/range/1/day/{date}/{date}"}
+    )
 
     @property
     def context_type(self) -> Type[ContextType]:
@@ -476,44 +511,80 @@ class MassiveDailyTickerSummaryModel(CallableModel):
     def _daily_contexts(self, context: MassiveDailyTickerSummaryContext) -> List[DailyAggregateContext]:
         return [DailyAggregateContext(ticker=ticker, date=context.date, adjusted=self.adjusted) for ticker in self.tickers]
 
-    def _unit_identities(self, context: MassiveDailyTickerSummaryContext) -> List[ETLUnitIdentity]:
+    def dataset_metadata(self) -> Dict[str, Any]:
+        return {
+            "name": self.dataset_name,
+            "description": self.dataset_description,
+            "schema_name": self.schema_name,
+            "schema_version": self.schema_version,
+            "return_type": self.return_type,
+            "partition_keys": list(self.partition_keys),
+            "cadence": self.cadence,
+            "media_types": list(self.media_types),
+            "quality_expectations": list(self.quality_expectations),
+            "output_hints": dict(self.output_hints),
+        }
+
+    def provider_metadata(self) -> Dict[str, Any]:
+        return {
+            "name": self.provider_name,
+            "provider_type": self.provider_type,
+            "capabilities": list(self.provider_capabilities),
+            "rate_limit": dict(self.provider_rate_limit),
+            "retry": dict(self.provider_retry),
+            "request_templates": dict(self.provider_request_templates),
+        }
+
+    def _output_key(self, context: MassiveDailyTickerSummaryContext, ticker: str) -> str:
         date_value = context.date.isoformat() if isinstance(context.date, date) else str(context.date)
+        raw_prefix = self.output_hints.get("raw_prefix", "{date}/{ticker}.json")
+        extension = "json" if self.return_type == "json" else self.return_type
+        return raw_prefix.format(date=date_value, ticker=ticker, return_type=self.return_type, extension=extension)
+
+    def _write_outputs(
+        self, context: MassiveDailyTickerSummaryContext, raw_payloads: Optional[List[Any]] = None, *, dry_run: bool = False
+    ) -> List[Any]:
+        if self.artifact_writer is None:
+            return []
+        raw_payloads = raw_payloads or [{} for _ in self.tickers]
+        codec = PayloadCodec(format=self.return_type)
         return [
-            ETLUnitIdentity(
-                provider=self.provider.name,
-                dataset=self.dataset.name,
-                partition={"date": date_value, "ticker": ticker},
-                schema_version=self.dataset.schema_version,
-                transform_version=self.transform_version,
-                destination=self.destination,
+            self.artifact_writer(
+                ArtifactWriteContext(
+                    key=self._output_key(context, ticker),
+                    payload=b"" if dry_run else codec.encode(raw_payload),
+                    media_type=codec.media_type,
+                    dataset=self.dataset_name,
+                    stage="extract",
+                    dry_run=dry_run,
+                )
             )
-            for ticker in self.tickers
+            for ticker, raw_payload in zip(self.tickers, raw_payloads)
         ]
 
     @Flow.call
     def __call__(self, context: MassiveDailyTickerSummaryContext) -> GenericResult:
         daily_contexts = self._daily_contexts(context)
-        unit_identities = self._unit_identities(context)
         requests = [safe_request_dump(self.daily_model.build_request(daily_context)) for daily_context in daily_contexts]
+        output_results = self._write_outputs(context, dry_run=True) if self.explain else []
         payload = {
-            "dataset": self.dataset.name,
-            "provider": self.provider.name,
+            "dataset": self.dataset_name,
+            "provider": self.provider_name,
             "date": context.date.isoformat() if isinstance(context.date, date) else str(context.date),
             "calendar": self.calendar,
             "tickers": list(self.tickers),
             "adjusted": self.adjusted,
-            "destination": self.destination,
+            "return_type": self.return_type,
+            "output_keys": [self._output_key(context, ticker) for ticker in self.tickers],
+            "output_writes": [result.model_dump(mode="json") for result in output_results],
             "required_env": ["MASSIVE_API_KEY"],
             "will_call_network": False,
-            "dataset_definition": self.dataset.model_dump(mode="json"),
-            "provider_definition": self.provider.model_dump(mode="json"),
-            "unit_identities": [
-                {**identity.model_dump(mode="json"), "key": identity.key(prefix="units"), "digest": identity.digest()} for identity in unit_identities
-            ],
+            "dataset_metadata": self.dataset_metadata(),
+            "provider_metadata": self.provider_metadata(),
             "base_models": {
                 "http": "ccflow_http.HTTPModel",
                 "request_model": f"{self.daily_model.__class__.__module__}.{self.daily_model.__class__.__name__}",
-                "storage": ["ccflow_s3.S3Model", "ccflow_s3.S3CacheStore", "ccflow_s3.S3CheckpointStore"],
+                "storage": ["ccflow_s3.S3Model", "ccflow_s3.S3CacheStore"],
             },
             "requests": requests,
         }
@@ -522,7 +593,237 @@ class MassiveDailyTickerSummaryModel(CallableModel):
         if not os.environ.get("MASSIVE_API_KEY"):
             raise ValueError("massive-daily-ticker-summary requires MASSIVE_API_KEY")
         results = [self.daily_model(daily_context).model_dump(mode="json") for daily_context in daily_contexts]
-        return GenericResult(value={**payload, "will_call_network": True, "results": results})
+        output_results = self._write_outputs(context, results, dry_run=False)
+        return GenericResult(
+            value={
+                **payload,
+                "will_call_network": True,
+                "results": results,
+                "output_writes": [result.model_dump(mode="json") for result in output_results],
+            }
+        )
+
+
+class MassiveAllStocksDailySummaryModel(CallableModel):
+    tickers_model: Any = Field(default_factory=TickersModel)
+    summary_model: MassiveDailyTickerSummaryModel = Field(default_factory=MassiveDailyTickerSummaryModel)
+    output: Optional[Any] = None
+    explain: bool = False
+    market: str = "stocks"
+    active: bool = True
+    limit: int = 1000
+    max_tickers: Optional[int] = None
+
+    @property
+    def context_type(self) -> Type[ContextType]:
+        return MassiveDailyTickerSummaryContext
+
+    @property
+    def result_type(self) -> Type[ResultType]:
+        return GenericResult
+
+    def _tickers_context(self, context: MassiveDailyTickerSummaryContext) -> TickersContext:
+        return TickersContext(market=self.market, active=self.active, active_date=context.date, limit=self.limit)
+
+    def _ticker_values(self, payload: Any) -> List[str]:
+        items = payload.get("results", []) if isinstance(payload, dict) else payload
+        tickers = [item.get("ticker") for item in items or [] if isinstance(item, dict) and item.get("ticker")]
+        return tickers[: self.max_tickers] if self.max_tickers is not None else tickers
+
+    @Flow.call
+    def __call__(self, context: MassiveDailyTickerSummaryContext) -> GenericResult:
+        ticker_context = self._tickers_context(context)
+        ticker_request = safe_request_dump(self.tickers_model.build_request(ticker_context))
+        payload = {
+            "dataset": "massive-all-stocks-daily-ticker-summary",
+            "provider": "massive",
+            "date": context.date.isoformat() if isinstance(context.date, date) else str(context.date),
+            "calendar": self.summary_model.calendar,
+            "return_type": self.summary_model.return_type,
+            "required_env": ["MASSIVE_API_KEY"],
+            "will_call_network": False,
+            "ticker_universe_request": ticker_request,
+            "summary_dataset_metadata": self.summary_model.dataset_metadata(),
+            "summary_provider_metadata": self.summary_model.provider_metadata(),
+            "base_models": {
+                "universe": f"{self.tickers_model.__class__.__module__}.{self.tickers_model.__class__.__name__}",
+                "summary": f"{self.summary_model.__class__.__module__}.{self.summary_model.__class__.__name__}",
+                "storage": ["ccflow_s3.S3ArtifactStore"],
+            },
+        }
+        if self.explain:
+            return GenericResult(value={**payload, "status": "planned", "ticker_count": None})
+        ticker_result = self.tickers_model(ticker_context)
+        tickers = self._ticker_values(ticker_result.value)
+        artifact_writer = ArtifactWriteModel(store=self.output) if self.output is not None else self.summary_model.artifact_writer
+        summary_model = self.summary_model.model_copy(update={"tickers": tickers, "artifact_writer": artifact_writer, "explain": False})
+        summary = summary_model(context).value
+        return GenericResult(
+            value={
+                **payload,
+                "status": "written",
+                "will_call_network": True,
+                "ticker_count": len(tickers),
+                "tickers": tickers,
+                "summary": summary,
+            }
+        )
+
+
+class MassiveFlatFileTransferModel(CallableModel):
+    dataset: MassiveStockFlatFileDataset = "day-aggs"
+    source_client: Optional[Any] = None
+    source_bucket: str = "flatfiles"
+    output: Optional[Any] = None
+    output_key_prefix: str = "massive/stocks/flat-files"
+    local_dir: Path = Path("/tmp/ccflow-massive-flat-files")
+    media_type: str = "application/gzip"
+    explain: bool = False
+    overwrite_output: bool = False
+
+    @property
+    def context_type(self) -> Type[ContextType]:
+        return MassiveFlatFileContext
+
+    @property
+    def result_type(self) -> Type[ResultType]:
+        return GenericResult
+
+    def dataset_metadata(self) -> Dict[str, Any]:
+        metadata = _MASSIVE_STOCK_FLAT_FILES[self.dataset]
+        return {
+            "name": f"massive-stocks-flat-files-{self.dataset}",
+            "description": metadata["description"],
+            "source_path": metadata["path"],
+            "partition_keys": ["date"],
+            "cadence": "1D",
+            "media_types": ["text/csv; charset=utf-8", "application/gzip"],
+            "provider_type": "s3",
+        }
+
+    def _date_parts(self, context: MassiveFlatFileContext) -> tuple[str, str, str]:
+        value = context.date if isinstance(context.date, date) else date.fromisoformat(str(context.date))
+        return f"{value:%Y}", f"{value:%m}", value.isoformat()
+
+    def source_key(self, context: MassiveFlatFileContext) -> str:
+        year, month, date_value = self._date_parts(context)
+        return f"{_MASSIVE_STOCK_FLAT_FILES[self.dataset]['path']}/{year}/{month}/{date_value}.csv.gz"
+
+    def output_key(self, context: MassiveFlatFileContext) -> str:
+        year, month, date_value = self._date_parts(context)
+        return f"{self.output_key_prefix.strip('/')}/{self.dataset}/{year}/{month}/{date_value}.csv.gz"
+
+    def local_path(self, context: MassiveFlatFileContext) -> Path:
+        year, month, date_value = self._date_parts(context)
+        return self.local_dir / self.dataset / year / month / f"{date_value}.csv.gz"
+
+    def _artifact_uri(self, key: str) -> str:
+        if self.output is None:
+            return key
+        if hasattr(self.output, "artifact_uri"):
+            return self.output.artifact_uri(key)
+        if hasattr(self.output, "uri"):
+            return self.output.uri(key)
+        return key
+
+    def _output_write_record(self, key: str, status: str, metadata: Optional[dict] = None) -> dict:
+        metadata = metadata or {}
+        artifact = ETLArtifact(
+            key=key,
+            stage="extract",
+            dataset=f"massive-stocks-flat-files-{self.dataset}",
+            uri=self._artifact_uri(key),
+            media_type=self.media_type,
+            status=status,
+            metadata=metadata,
+        )
+        return {"key": key, "uri": artifact.uri, "status": status, "artifact": artifact.model_dump(mode="json"), "metadata": metadata}
+
+    def _output_exists(self, key: str) -> bool:
+        if self.output is None or not hasattr(self.output, "exists"):
+            return False
+        return self.output.exists(key)
+
+    def _source_s3_client(self):
+        if self.source_client is None:
+            raise ValueError("Massive flat-file transfer requires source_client.")
+        return getattr(self.source_client, "client", self.source_client)
+
+    def _download(self, source_key: str, local_path: Path) -> None:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        client = self._source_s3_client()
+        if hasattr(client, "download_file"):
+            client.download_file(Bucket=self.source_bucket, Key=source_key, Filename=str(local_path))
+            return
+        response = client.get_object(Bucket=self.source_bucket, Key=source_key)
+        local_path.write_bytes(response["Body"].read())
+
+    def _publish_output(self, key: str, local_path: Path, context: MassiveFlatFileContext) -> list[dict]:
+        if self.output is None:
+            raise ValueError("Massive flat-file transfer requires output.")
+        metadata = {
+            "dataset": f"massive-stocks-flat-files-{self.dataset}",
+            "date": context.date.isoformat() if isinstance(context.date, date) else str(context.date),
+            "source_bucket": self.source_bucket,
+            "source_key": self.source_key(context),
+        }
+        if not self.overwrite_output and self._output_exists(key):
+            return [self._output_write_record(key, "exists", metadata)]
+        if hasattr(self.output, "write_file"):
+            response = self.output.write_file(key, local_path, media_type=self.media_type, metadata=metadata)
+            response_metadata = response if isinstance(response, dict) else {}
+            status = str(response_metadata.get("status", "written"))
+            return [self._output_write_record(key, status, {**metadata, **response_metadata})]
+        writer = ArtifactWriteModel(store=self.output)
+        result = writer(
+            ArtifactWriteContext(
+                key=key,
+                payload=local_path.read_bytes(),
+                media_type=self.media_type,
+                dataset=f"massive-stocks-flat-files-{self.dataset}",
+                stage="extract",
+                overwrite=self.overwrite_output,
+                metadata=metadata,
+            )
+        )
+        return [result.model_dump(mode="json")]
+
+    def _plan(self, context: MassiveFlatFileContext) -> dict:
+        source_key = self.source_key(context)
+        output_key = self.output_key(context)
+        return {
+            "dataset": f"massive-stocks-flat-files-{self.dataset}",
+            "provider": "massive",
+            "date": context.date.isoformat() if isinstance(context.date, date) else str(context.date),
+            "source_bucket": self.source_bucket,
+            "source_key": source_key,
+            "source_uri": f"s3://{self.source_bucket}/{source_key}",
+            "output_key": output_key,
+            "output_uri": self._artifact_uri(output_key) if self.output is not None else None,
+            "local_path": str(self.local_path(context)),
+            "will_download": False,
+            "will_publish_output": False,
+            "output_writes": [self._output_write_record(output_key, "planned", {})] if self.output is not None else [],
+            "required_env": ["MASSIVE_API_KEY_ID", "MASSIVE_API_KEY"],
+            "dataset_metadata": self.dataset_metadata(),
+            "base_models": {"source": "ccflow_s3.S3Client", "storage": ["ccflow_s3.S3ArtifactStore"]},
+        }
+
+    @Flow.call
+    def __call__(self, context: MassiveFlatFileContext) -> GenericResult:
+        payload = self._plan(context)
+        if self.explain:
+            return GenericResult(value={**payload, "status": "planned"})
+        if self.output is None:
+            raise ValueError("Massive flat-file transfer requires output.")
+        if not self.overwrite_output and self._output_exists(payload["output_key"]):
+            output_writes = [self._output_write_record(payload["output_key"], "exists", {"source_key": payload["source_key"]})]
+            return GenericResult(value={**payload, "status": "exists", "output_writes": output_writes})
+        local_path = self.local_path(context)
+        self._download(payload["source_key"], local_path)
+        output_writes = self._publish_output(payload["output_key"], local_path, context)
+        status = output_writes[0]["status"] if output_writes else "written"
+        return GenericResult(value={**payload, "status": status, "will_download": True, "will_publish_output": True, "output_writes": output_writes})
 
 
 class DailyAggregateBackfillModel(CallableModel):

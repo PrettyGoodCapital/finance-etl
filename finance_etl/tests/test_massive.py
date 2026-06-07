@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pyarrow.parquet as pq
+import pytest
 from ccflow import Flow, GenericResult
 from ccflow_etl import (
     APIKeySecretCredentials,
@@ -10,6 +12,7 @@ from ccflow_etl import (
     LocalFileOutput,
     NoOpArtifactStore,
 )
+from ccflow_http import HTTPResult
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 
@@ -23,6 +26,8 @@ from finance_etl.providers.massive import (
     MarketCalendarModel,
     MarketHolidaysModel,
     MassiveAllStocksDailySummaryModel,
+    MassiveAllTickersContext,
+    MassiveAllTickersModel,
     MassiveCredentials,
     MassiveDailyTickerSummaryContext,
     MassiveDailyTickerSummaryModel,
@@ -82,6 +87,13 @@ hydra:
         indexed_cfg = compose(config_name="indexed")
 
     assert isinstance(instantiate(indexed_cfg.credentials.providers.massive.rest), MassiveCredentials)
+    assert indexed_cfg.credentials.providers.massive.rest.token is None
+    assert indexed_cfg.credentials.providers.massive.rest.token_env == "MASSIVE_API_KEY"
+
+    with initialize_config_dir(config_dir=str(tmp_path), version_base=None):
+        override_cfg = compose(config_name="indexed", overrides=["credentials.providers.massive.rest.token=configured-secret"])
+
+    assert instantiate(override_cfg.credentials.providers.massive.rest).token == "configured-secret"
 
 
 def test_massive_market_metadata_models_build_expected_requests(monkeypatch):
@@ -97,6 +109,40 @@ def test_massive_market_metadata_models_build_expected_requests(monkeypatch):
     assert exchanges.params == {"asset_class": "stocks", "locale": "us", "apiKey": "secret"}
     assert tickers.url == "/v3/reference/tickers"
     assert tickers.params == {"market": "stocks", "active": True, "limit": 1000, "apiKey": "secret"}
+
+
+def test_massive_tickers_model_validates_and_builds_supported_filters(monkeypatch):
+    monkeypatch.setenv("MASSIVE_API_KEY", "secret")
+
+    request = TickersModel().build_request(
+        TickersContext(
+            active_date="2025-01-02",
+            ticker=" AAPL ",
+            ticker_type=" CS ",
+            market="stocks",
+            exchange="XNYS",
+            order="asc",
+            sort="ticker",
+            limit=500,
+        )
+    )
+
+    assert request.params == {
+        "ticker": "AAPL",
+        "type": "CS",
+        "market": "stocks",
+        "exchange": "XNYS",
+        "active": True,
+        "order": "asc",
+        "limit": 500,
+        "sort": "ticker",
+        "date": "2025-01-02",
+        "apiKey": "secret",
+    }
+    with pytest.raises(ValueError):
+        TickersContext(market="bonds")
+    with pytest.raises(ValueError):
+        TickersContext(limit=1001)
 
 
 def test_massive_daily_aggregate_model_builds_ticker_date_request(monkeypatch):
@@ -344,6 +390,110 @@ def test_massive_flat_file_transfer_downloads_and_writes_output(tmp_path):
     assert output.writes[0]["key"] == "massive/stocks/flat-files/quotes/2025/11/2025-11-05.csv.gz"
     assert output.writes[0]["body"] == b"csv-gzip-bytes"
     assert output.writes[0]["media_type"] == "application/gzip"
+
+
+def test_massive_all_tickers_explain_plans_single_json_output(monkeypatch):
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+
+    payload = MassiveAllTickersModel(output=NoOpArtifactStore(), explain=True)(["2025-01-02"]).value
+
+    assert payload["dataset"] == "massive-stocks-rest-all-tickers"
+    assert payload["status"] == "planned"
+    assert payload["ticker_request"]["url"] == "/v3/reference/tickers"
+    assert payload["ticker_request"]["params"] == {"market": "stocks", "active": True, "limit": 1000, "date": "2025-01-02"}
+    assert payload["output_key"] == "massive/stocks/rest/all-tickers/2025-01-02.json"
+    assert payload["output_uri"] == "noop://artifact/massive/stocks/rest/all-tickers/2025-01-02.json"
+    assert payload["output_writes"][0]["status"] == "planned"
+    assert payload["provider_metadata"]["retry"]["retry_status_codes"] == [429, 500, 502, 503, 504]
+
+
+def test_massive_all_tickers_writes_combined_raw_json():
+    class FakeTickersModel(TickersModel):
+        @Flow.call
+        def __call__(self, context):
+            return HTTPResult(
+                value={"status": "OK", "count": 2, "results": [{"ticker": "AAA"}, {"ticker": "BBB"}]},
+                status_code=200,
+                url="https://api.massive.com/v3/reference/tickers",
+                attempts=3,
+                pages=2,
+                rate_limit={"x-ratelimit-remaining": "10"},
+                retry_events=[{"attempt": 1, "outcome": "retry", "status_code": 429}],
+                retry_summary={"attempts": 3, "retried": 1, "failed": 0, "succeeded": 1},
+            )
+
+    class FakeOutput:
+        def __init__(self):
+            self.writes = []
+
+        def artifact_uri(self, key):
+            return f"s3://shared/{key}"
+
+        def exists(self, key):
+            return False
+
+        def write(self, key, payload, media_type=None, metadata=None):
+            self.writes.append({"key": key, "payload": payload, "media_type": media_type, "metadata": metadata})
+            return {"status": "written", "object": key}
+
+    output = FakeOutput()
+    payload = MassiveAllTickersModel(tickers_model=FakeTickersModel(), output=output)(MassiveAllTickersContext(date="2025-01-02")).value
+
+    assert payload["status"] == "written"
+    assert payload["ticker_count"] == 2
+    assert payload["page_count"] == 2
+    assert payload["retry_summary"] == {"attempts": 3, "retried": 1, "failed": 0, "succeeded": 1}
+    assert output.writes[0]["key"] == "massive/stocks/rest/all-tickers/2025-01-02.json"
+    assert output.writes[0]["media_type"] == "application/json"
+    assert json.loads(output.writes[0]["payload"]) == {"status": "OK", "count": 2, "results": [{"ticker": "AAA"}, {"ticker": "BBB"}]}
+
+
+def test_massive_all_tickers_preflights_output_before_http_download():
+    calls = []
+
+    class FakeTickersModel(TickersModel):
+        @Flow.call
+        def __call__(self, context):
+            calls.append(context)
+            return HTTPResult(value={"results": []}, status_code=200)
+
+    class MissingCredentialOutput:
+        def artifact_uri(self, key):
+            return f"s3://shared/{key}"
+
+        def exists(self, key):
+            raise RuntimeError("missing output credentials")
+
+    model = MassiveAllTickersModel(tickers_model=FakeTickersModel(), output=MissingCredentialOutput())
+
+    with pytest.raises(RuntimeError, match="missing output credentials"):
+        model(["2025-01-02"])
+
+    assert calls == []
+
+
+def test_massive_all_tickers_skips_http_when_output_exists():
+    calls = []
+
+    class FakeTickersModel(TickersModel):
+        @Flow.call
+        def __call__(self, context):
+            calls.append(context)
+            return HTTPResult(value={"results": []}, status_code=200)
+
+    class ExistingOutput:
+        def artifact_uri(self, key):
+            return f"s3://shared/{key}"
+
+        def exists(self, key):
+            return True
+
+    payload = MassiveAllTickersModel(tickers_model=FakeTickersModel(), output=ExistingOutput())(["2025-01-02"]).value
+
+    assert calls == []
+    assert payload["status"] == "exists"
+    assert payload["will_call_network"] is False
+    assert payload["output_writes"][0]["artifact"]["uri"] == "s3://shared/massive/stocks/rest/all-tickers/2025-01-02.json"
 
 
 def test_massive_all_stocks_daily_summary_explain_plans_ticker_universe_request(monkeypatch):

@@ -29,8 +29,10 @@ from finance_etl.providers.massive import (
     MassiveAllTickersContext,
     MassiveAllTickersModel,
     MassiveCredentials,
+    MassiveDailyAggregateExtractModel,
     MassiveDailyTickerSummaryContext,
     MassiveDailyTickerSummaryModel,
+    MassiveDatedSymbolUniverseModel,
     MassiveFlatFileTransferModel,
     TickersContext,
     TickersModel,
@@ -152,6 +154,60 @@ def test_massive_daily_aggregate_model_builds_ticker_date_request(monkeypatch):
 
     assert request.url == "/v2/aggs/ticker/AAA/range/1/day/2024-01-03/2024-01-03"
     assert request.params == {"adjusted": True, "sort": "asc", "limit": 50000, "apiKey": "secret"}
+
+
+def test_massive_daily_aggregate_extract_explain_plans_output_write(monkeypatch):
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+
+    payload = MassiveDailyAggregateExtractModel(output=NoOpArtifactStore(), explain=True)(
+        DailyAggregateContext(ticker="AAPL", date="2025-01-02", adjusted=True)
+    ).value
+
+    assert payload["status"] == "planned"
+    assert payload["will_call_network"] is False
+    assert payload["request"]["url"] == "/v2/aggs/ticker/AAPL/range/1/day/2025-01-02/2025-01-02"
+    assert payload["request"]["params"] == {"adjusted": True, "sort": "asc", "limit": 50000}
+    assert payload["output_key"] == "massive/stocks/rest/daily-aggs/json/2025-01-02/AAPL.json"
+    assert payload["output_uri"] == "noop://artifact/massive/stocks/rest/daily-aggs/json/2025-01-02/AAPL.json"
+    assert payload["output_writes"][0]["status"] == "planned"
+
+
+def test_massive_daily_aggregate_extract_writes_raw_payload():
+    class FakeDailyModel(DailyAggregateModel):
+        @Flow.call
+        def __call__(self, context):
+            return HTTPResult(
+                value={"ticker": context.ticker, "results": [{"c": 42.0}]},
+                status_code=200,
+                attempts=2,
+                retry_summary={"attempts": 2, "retried": 1, "failed": 0, "succeeded": 1},
+            )
+
+    class FakeOutput:
+        def __init__(self):
+            self.writes = []
+
+        def artifact_uri(self, key):
+            return f"s3://shared/{key}"
+
+        def exists(self, key):
+            return False
+
+        def write(self, key, payload, media_type=None, metadata=None):
+            self.writes.append({"key": key, "payload": payload, "media_type": media_type, "metadata": metadata})
+            return {"status": "written", "object": key}
+
+    output = FakeOutput()
+    payload = MassiveDailyAggregateExtractModel(daily_model=FakeDailyModel(), output=output)(
+        DailyAggregateContext(ticker="AAPL", date="2025-01-02")
+    ).value
+
+    assert payload["status"] == "written"
+    assert payload["will_call_network"] is True
+    assert payload["retry_summary"] == {"attempts": 2, "retried": 1, "failed": 0, "succeeded": 1}
+    assert output.writes[0]["key"] == "massive/stocks/rest/daily-aggs/json/2025-01-02/AAPL.json"
+    assert output.writes[0]["media_type"] == "application/json"
+    assert json.loads(output.writes[0]["payload"]) == {"results": [{"c": 42.0}], "ticker": "AAPL"}
 
 
 def test_massive_daily_aggregate_backfill_builds_business_day_requests(monkeypatch):
@@ -282,6 +338,55 @@ def test_massive_ticker_universe_plan_builds_date_specific_requests(monkeypatch)
         {"market": "stocks", "active": True, "limit": 1000, "date": "2024-01-02", "apiKey": "secret"},
         {"market": "stocks", "active": True, "limit": 1000, "date": "2024-01-03", "apiKey": "secret"},
     ]
+
+
+def test_massive_dated_symbol_universe_explain_plans_ticker_request(monkeypatch):
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+
+    payload = MassiveDatedSymbolUniverseModel(exchange="XNYS", ticker_type="CS", explain=True)(["2025-01-02"]).value
+
+    assert payload["status"] == "planned"
+    assert payload["will_call_network"] is False
+    assert payload["request"]["url"] == "/v3/reference/tickers"
+    assert payload["request"]["params"] == {
+        "market": "stocks",
+        "active": True,
+        "limit": 1000,
+        "type": "CS",
+        "exchange": "XNYS",
+        "sort": "ticker",
+        "date": "2025-01-02",
+    }
+
+
+def test_massive_dated_symbol_universe_fetches_normalized_symbols():
+    calls = []
+
+    class FakeTickersModel(TickersModel):
+        @Flow.call
+        def __call__(self, context):
+            calls.append((context, self.max_pages))
+            return HTTPResult(
+                value={"results": [{"ticker": "msft"}, {"ticker": "AAPL"}, {"ticker": "AAPL"}, {"name": "missing"}]},
+                status_code=200,
+                pages=2,
+            )
+
+    payload = MassiveDatedSymbolUniverseModel(
+        tickers_model=FakeTickersModel(),
+        exchange="XNYS",
+        max_pages=7,
+        max_symbols=2,
+    )(["2025-01-02"]).value
+
+    assert payload.as_of_date == date(2025, 1, 2)
+    assert payload.symbols == ["AAPL", "MSFT"]
+    assert payload.source == "massive-stocks-rest-tickers"
+    assert payload.metadata["ticker_count"] == 2
+    assert payload.metadata["pages"] == 2
+    assert calls[0][0].active_date == date(2025, 1, 2)
+    assert calls[0][0].exchange == "XNYS"
+    assert calls[0][1] == 7
 
 
 def test_massive_daily_ticker_summary_explain_includes_metadata_and_requests(monkeypatch):

@@ -201,7 +201,7 @@ def test_finance_calendar_config_can_drive_ccflow_backfill(tmp_path):
     (config_path / "runner.yaml").write_text(
         """
 defaults:
-    - /backfill: daily
+    - /backfills: default
     - /finance_calendars: default
     - _self_
 
@@ -212,6 +212,10 @@ hydra:
 
 model:
   _target_: finance_etl.tests.test_calendars.EchoFinanceDateModel
+
+task: ${model}
+backfill: /backfills/daily
+callable: ${backfill}
 
 cli:
   model:
@@ -240,7 +244,6 @@ context:
         debug=False,
     )
 
-    ModelRegistry.root().clear()
     output = cfg_run(result.cfg)
 
     assert output.value["steps"] == 4

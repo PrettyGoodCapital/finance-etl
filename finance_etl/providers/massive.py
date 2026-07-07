@@ -866,131 +866,117 @@ class DailyAggregateModel(MassiveHTTPModel):
         return super().build_request(context)
 
 
-class MassiveDailyAggregateExtractModel(CallableModel):
-    daily_model: DailyAggregateModel = Field(default_factory=DailyAggregateModel)
+class _MassiveRESTExtractModel(CallableModel):
     output: Optional[Any] = None
     explain: bool = False
     return_type: str = "json"
-    output_key_prefix: str = "massive/stocks/rest/daily-aggs"
+    output_key_prefix: str
     overwrite_output: bool = False
-    dataset_name: str = "massive-stocks-rest-daily-aggs"
+    dataset_name: str
     provider_name: str = "massive"
-
-    @property
-    def context_type(self) -> Type[ContextType]:
-        return DailyAggregateContext
 
     @property
     def result_type(self) -> Type[ResultType]:
         return GenericResult
 
-    def _date_value(self, context: DailyAggregateContext) -> str:
-        return context.date.isoformat() if isinstance(context.date, date) else str(context.date)
+    def _request_model(self) -> CallableModel:
+        raise NotImplementedError
 
-    def output_key(self, context: DailyAggregateContext) -> str:
-        suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
-        return f"{self.output_key_prefix.strip('/')}/{self.return_type}/{self._date_value(context)}/{context.ticker}{suffix}"
+    def output_key(self, context: ContextType) -> str:
+        raise NotImplementedError
 
-    def _artifact_uri(self, key: str) -> str:
-        if self.output is None:
-            return key
-        if hasattr(self.output, "artifact_uri"):
-            return self.output.artifact_uri(key)
-        if hasattr(self.output, "uri"):
-            return self.output.uri(key)
-        return key
+    def _metadata(self, context: ContextType) -> Dict[str, Any]:
+        raise NotImplementedError
 
-    def _planned_write(self, context: DailyAggregateContext) -> List[Dict[str, Any]]:
+    def _plan_fields(self, context: ContextType) -> Dict[str, Any]:
+        return {}
+
+    def dataset_metadata(self) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def _output_required_message(self) -> str:
+        return f"{self.dataset_name} extract task requires output."
+
+    def _base_models(self) -> Dict[str, Any]:
+        request_model = self._request_model()
+        return {
+            "http": "ccflow_http.HTTPModel",
+            "request_model": f"{request_model.__class__.__module__}.{request_model.__class__.__name__}",
+            "storage": ["ccflow_s3.S3ArtifactStore"],
+        }
+
+    def _planned_write(self, context: ContextType) -> List[Dict[str, Any]]:
         if self.output is None:
             return []
-        codec = PayloadCodec(format=self.return_type)
-        result = ArtifactWriteModel(store=self.output)(
-            ArtifactWriteContext(
+        return [
+            _artifact_write(
+                output=self.output,
                 key=self.output_key(context),
-                payload=b"",
-                media_type=codec.media_type,
-                dataset=self.dataset_name,
-                stage="extract",
+                payload={},
+                return_type=self.return_type,
+                dataset_name=self.dataset_name,
+                metadata=self._metadata(context),
                 overwrite=self.overwrite_output,
                 dry_run=True,
-                metadata={"date": self._date_value(context), "ticker": context.ticker, "provider": self.provider_name},
             )
-        )
-        return [result.model_dump(mode="json")]
-
-    def _existing_write(self, context: DailyAggregateContext) -> List[Dict[str, Any]]:
-        key = self.output_key(context)
-        artifact = ETLArtifact(
-            key=key,
-            stage="extract",
-            dataset=self.dataset_name,
-            uri=self._artifact_uri(key),
-            media_type=PayloadCodec(format=self.return_type).media_type,
-            status="exists",
-            metadata={"date": self._date_value(context), "ticker": context.ticker, "provider": self.provider_name},
-        )
-        return [
-            {
-                "key": artifact.key,
-                "uri": artifact.uri,
-                "status": "exists",
-                "artifact": artifact.model_dump(mode="json"),
-                "metadata": dict(artifact.metadata),
-            }
         ]
 
-    def _output_exists(self, context: DailyAggregateContext) -> bool:
+    def _existing_write(self, context: ContextType) -> List[Dict[str, Any]]:
+        return [
+            _existing_artifact(
+                output=self.output,
+                key=self.output_key(context),
+                return_type=self.return_type,
+                dataset_name=self.dataset_name,
+                metadata=self._metadata(context),
+            )
+        ]
+
+    def _output_exists(self, context: ContextType) -> bool:
         if self.output is None or self.overwrite_output or not hasattr(self.output, "exists"):
             return False
         return self.output.exists(self.output_key(context))
 
-    def _write_output(self, context: DailyAggregateContext, payload: Any) -> List[Dict[str, Any]]:
+    def _write_output(self, context: ContextType, payload: Any) -> List[Dict[str, Any]]:
         if self.output is None:
-            raise ValueError("Massive daily aggregate extract task requires output.")
-        codec = PayloadCodec(format=self.return_type)
-        result = ArtifactWriteModel(store=self.output)(
-            ArtifactWriteContext(
+            raise ValueError(self._output_required_message())
+        return [
+            _artifact_write(
+                output=self.output,
                 key=self.output_key(context),
-                payload=codec.encode(payload),
-                media_type=codec.media_type,
-                dataset=self.dataset_name,
-                stage="extract",
+                payload=payload,
+                return_type=self.return_type,
+                dataset_name=self.dataset_name,
+                metadata=self._metadata(context),
                 overwrite=self.overwrite_output,
-                metadata={"date": self._date_value(context), "ticker": context.ticker, "provider": self.provider_name},
             )
-        )
-        return [result.model_dump(mode="json")]
+        ]
 
-    def _plan(self, context: DailyAggregateContext) -> Dict[str, Any]:
+    def _plan(self, context: ContextType) -> Dict[str, Any]:
         output_key = self.output_key(context)
         return {
             "dataset": self.dataset_name,
             "provider": self.provider_name,
-            "date": self._date_value(context),
-            "ticker": context.ticker,
-            "adjusted": context.adjusted,
+            **self._plan_fields(context),
             "return_type": self.return_type,
             "output_key": output_key,
-            "output_uri": self._artifact_uri(output_key) if self.output is not None else None,
+            "output_uri": _artifact_uri(self.output, output_key) if self.output is not None else None,
             "output_writes": self._planned_write(context),
             "required_env": ["MASSIVE_API_KEY"],
             "will_call_network": False,
             "will_publish_output": False,
-            "request": safe_request_dump(self.daily_model.build_request(context)),
-            "base_models": {
-                "http": "ccflow_http.HTTPModel",
-                "request_model": f"{self.daily_model.__class__.__module__}.{self.daily_model.__class__.__name__}",
-                "storage": ["ccflow_s3.S3ArtifactStore"],
-            },
+            "request": safe_request_dump(self._request_model().build_request(context)),
+            "dataset_metadata": self.dataset_metadata(),
+            "base_models": self._base_models(),
         }
 
     @Flow.call
-    def __call__(self, context: DailyAggregateContext) -> GenericResult:
+    def __call__(self, context: ContextType) -> GenericResult:
         payload = self._plan(context)
         if self.explain:
             return GenericResult(value={**payload, "status": "planned"})
         if self.output is None:
-            raise ValueError("Massive daily aggregate extract task requires output.")
+            raise ValueError(self._output_required_message())
         if self._output_exists(context):
             return GenericResult(
                 value={
@@ -1006,7 +992,7 @@ class MassiveDailyAggregateExtractModel(CallableModel):
                 }
             )
 
-        result = self.daily_model(context)
+        result = self._request_model()(context)
         raw_payload = result.value if isinstance(result, GenericResult) else result.model_dump(mode="json")
         output_writes = self._write_output(context, raw_payload)
         status = output_writes[0]["status"] if output_writes else "written"
@@ -1024,6 +1010,40 @@ class MassiveDailyAggregateExtractModel(CallableModel):
                 "output_writes": output_writes,
             }
         )
+
+
+class MassiveDailyAggregateExtractModel(_MassiveRESTExtractModel):
+    daily_model: DailyAggregateModel = Field(default_factory=DailyAggregateModel)
+    output_key_prefix: str = "massive/stocks/rest/daily-aggs"
+    dataset_name: str = "massive-stocks-rest-daily-aggs"
+
+    @property
+    def context_type(self) -> Type[ContextType]:
+        return DailyAggregateContext
+
+    def _request_model(self) -> DailyAggregateModel:
+        return self.daily_model
+
+    def _date_value(self, context: DailyAggregateContext) -> str:
+        return _date_value(context.date)
+
+    def output_key(self, context: DailyAggregateContext) -> str:
+        suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
+        return f"{self.output_key_prefix.strip('/')}/{self.return_type}/{self._date_value(context)}/{context.ticker}{suffix}"
+
+    def _metadata(self, context: DailyAggregateContext) -> Dict[str, Any]:
+        return {"date": self._date_value(context), "ticker": context.ticker, "provider": self.provider_name}
+
+    def _plan_fields(self, context: DailyAggregateContext) -> Dict[str, Any]:
+        return {"date": self._date_value(context), "ticker": context.ticker, "adjusted": context.adjusted}
+
+    def dataset_metadata(self) -> Dict[str, Any]:
+        return {
+            "name": self.dataset_name,
+            "endpoint": "/v2/aggs/ticker/{ticker}/range/1/day/{date}/{date}",
+            "partition_keys": ["date", "ticker"],
+            "media_types": [PayloadCodec(format=self.return_type).media_type],
+        }
 
 
 class StockDataPlanModel(CallableModel):
@@ -1154,23 +1174,17 @@ class DailyTickerSummaryModel(MassiveHTTPModel):
         return super().build_request(context.model_copy(update={"query": query}))
 
 
-class MassiveTickerOverviewExtractModel(CallableModel):
+class MassiveTickerOverviewExtractModel(_MassiveRESTExtractModel):
     overview_model: TickerOverviewModel = Field(default_factory=TickerOverviewModel)
-    output: Optional[Any] = None
-    explain: bool = False
-    return_type: str = "json"
     output_key_prefix: str = "massive/stocks/rest/ticker-overview"
-    overwrite_output: bool = False
     dataset_name: str = "massive-stocks-rest-ticker-overview"
-    provider_name: str = "massive"
 
     @property
     def context_type(self) -> Type[ContextType]:
         return TickerOverviewContext
 
-    @property
-    def result_type(self) -> Type[ResultType]:
-        return GenericResult
+    def _request_model(self) -> TickerOverviewModel:
+        return self.overview_model
 
     def output_key(self, context: TickerOverviewContext) -> str:
         suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
@@ -1179,120 +1193,29 @@ class MassiveTickerOverviewExtractModel(CallableModel):
     def _metadata(self, context: TickerOverviewContext) -> Dict[str, Any]:
         return {"date": _date_value(context.date), "ticker": context.ticker, "provider": self.provider_name}
 
-    def _output_exists(self, context: TickerOverviewContext) -> bool:
-        if self.output is None or self.overwrite_output or not hasattr(self.output, "exists"):
-            return False
-        return self.output.exists(self.output_key(context))
+    def _plan_fields(self, context: TickerOverviewContext) -> Dict[str, Any]:
+        return {"date": _date_value(context.date), "ticker": context.ticker}
 
-    def _planned_write(self, context: TickerOverviewContext) -> List[Dict[str, Any]]:
-        if self.output is None:
-            return []
-        return [
-            _artifact_write(
-                output=self.output,
-                key=self.output_key(context),
-                payload={},
-                return_type=self.return_type,
-                dataset_name=self.dataset_name,
-                metadata=self._metadata(context),
-                overwrite=self.overwrite_output,
-                dry_run=True,
-            )
-        ]
-
-    def _plan(self, context: TickerOverviewContext) -> Dict[str, Any]:
-        output_key = self.output_key(context)
+    def dataset_metadata(self) -> Dict[str, Any]:
         return {
-            "dataset": self.dataset_name,
-            "provider": self.provider_name,
-            "date": _date_value(context.date),
-            "ticker": context.ticker,
-            "return_type": self.return_type,
-            "output_key": output_key,
-            "output_uri": _artifact_uri(self.output, output_key) if self.output is not None else None,
-            "output_writes": self._planned_write(context),
-            "required_env": ["MASSIVE_API_KEY"],
-            "will_call_network": False,
-            "will_publish_output": False,
-            "request": safe_request_dump(self.overview_model.build_request(context)),
-            "dataset_metadata": {
-                "name": self.dataset_name,
-                "endpoint": "/v3/reference/tickers/{ticker}",
-                "partition_keys": ["date", "ticker"],
-                "media_types": [PayloadCodec(format=self.return_type).media_type],
-            },
+            "name": self.dataset_name,
+            "endpoint": "/v3/reference/tickers/{ticker}",
+            "partition_keys": ["date", "ticker"],
+            "media_types": [PayloadCodec(format=self.return_type).media_type],
         }
 
-    @Flow.call
-    def __call__(self, context: TickerOverviewContext) -> GenericResult:
-        payload = self._plan(context)
-        if self.explain:
-            return GenericResult(value={**payload, "status": "planned"})
-        if self.output is None:
-            raise ValueError("Massive ticker overview extract task requires output.")
-        if self._output_exists(context):
-            return GenericResult(
-                value={
-                    **payload,
-                    "status": "exists",
-                    "will_call_network": False,
-                    "output_writes": [
-                        _existing_artifact(
-                            output=self.output,
-                            key=self.output_key(context),
-                            return_type=self.return_type,
-                            dataset_name=self.dataset_name,
-                            metadata=self._metadata(context),
-                        )
-                    ],
-                }
-            )
-        result = self.overview_model(context)
-        raw_payload = result.value if isinstance(result, GenericResult) else result.model_dump(mode="json")
-        output_writes = [
-            _artifact_write(
-                output=self.output,
-                key=self.output_key(context),
-                payload=raw_payload,
-                return_type=self.return_type,
-                dataset_name=self.dataset_name,
-                metadata=self._metadata(context),
-                overwrite=self.overwrite_output,
-            )
-        ]
-        return GenericResult(
-            value={
-                **payload,
-                "status": output_writes[0]["status"],
-                "will_call_network": True,
-                "will_publish_output": True,
-                "status_code": getattr(result, "status_code", None),
-                "attempts": getattr(result, "attempts", 1),
-                "rate_limit": getattr(result, "rate_limit", {}),
-                "retry_events": getattr(result, "retry_events", []),
-                "retry_summary": getattr(result, "retry_summary", {}),
-                "output_writes": output_writes,
-            }
-        )
 
-
-class MassiveDailyMarketSummaryExtractModel(CallableModel):
+class MassiveDailyMarketSummaryExtractModel(_MassiveRESTExtractModel):
     market_summary_model: DailyMarketSummaryModel = Field(default_factory=DailyMarketSummaryModel)
-    output: Optional[Any] = None
-    explain: bool = False
-    return_type: str = "json"
     output_key_prefix: str = "massive/stocks/rest/daily-market-summary"
-    overwrite_output: bool = False
     dataset_name: str = "massive-stocks-rest-daily-market-summary"
-    provider_name: str = "massive"
 
     @property
     def context_type(self) -> Type[ContextType]:
         return DailyMarketSummaryContext
 
-    @property
-    def result_type(self) -> Type[ResultType]:
-        return GenericResult
+    def _request_model(self) -> DailyMarketSummaryModel:
+        return self.market_summary_model
 
     def output_key(self, context: DailyMarketSummaryContext) -> str:
         suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
@@ -1301,121 +1224,29 @@ class MassiveDailyMarketSummaryExtractModel(CallableModel):
     def _metadata(self, context: DailyMarketSummaryContext) -> Dict[str, Any]:
         return {"date": _date_value(context.date), "provider": self.provider_name, "market": "stocks"}
 
-    def _output_exists(self, context: DailyMarketSummaryContext) -> bool:
-        if self.output is None or self.overwrite_output or not hasattr(self.output, "exists"):
-            return False
-        return self.output.exists(self.output_key(context))
+    def _plan_fields(self, context: DailyMarketSummaryContext) -> Dict[str, Any]:
+        return {"date": _date_value(context.date), "adjusted": context.adjusted, "include_otc": context.include_otc}
 
-    def _planned_write(self, context: DailyMarketSummaryContext) -> List[Dict[str, Any]]:
-        if self.output is None:
-            return []
-        return [
-            _artifact_write(
-                output=self.output,
-                key=self.output_key(context),
-                payload={},
-                return_type=self.return_type,
-                dataset_name=self.dataset_name,
-                metadata=self._metadata(context),
-                overwrite=self.overwrite_output,
-                dry_run=True,
-            )
-        ]
-
-    def _plan(self, context: DailyMarketSummaryContext) -> Dict[str, Any]:
-        output_key = self.output_key(context)
+    def dataset_metadata(self) -> Dict[str, Any]:
         return {
-            "dataset": self.dataset_name,
-            "provider": self.provider_name,
-            "date": _date_value(context.date),
-            "adjusted": context.adjusted,
-            "include_otc": context.include_otc,
-            "return_type": self.return_type,
-            "output_key": output_key,
-            "output_uri": _artifact_uri(self.output, output_key) if self.output is not None else None,
-            "output_writes": self._planned_write(context),
-            "required_env": ["MASSIVE_API_KEY"],
-            "will_call_network": False,
-            "will_publish_output": False,
-            "request": safe_request_dump(self.market_summary_model.build_request(context)),
-            "dataset_metadata": {
-                "name": self.dataset_name,
-                "endpoint": "/v2/aggs/grouped/locale/us/market/stocks/{date}",
-                "partition_keys": ["date"],
-                "media_types": [PayloadCodec(format=self.return_type).media_type],
-            },
+            "name": self.dataset_name,
+            "endpoint": "/v2/aggs/grouped/locale/us/market/stocks/{date}",
+            "partition_keys": ["date"],
+            "media_types": [PayloadCodec(format=self.return_type).media_type],
         }
 
-    @Flow.call
-    def __call__(self, context: DailyMarketSummaryContext) -> GenericResult:
-        payload = self._plan(context)
-        if self.explain:
-            return GenericResult(value={**payload, "status": "planned"})
-        if self.output is None:
-            raise ValueError("Massive daily market summary extract task requires output.")
-        if self._output_exists(context):
-            return GenericResult(
-                value={
-                    **payload,
-                    "status": "exists",
-                    "will_call_network": False,
-                    "output_writes": [
-                        _existing_artifact(
-                            output=self.output,
-                            key=self.output_key(context),
-                            return_type=self.return_type,
-                            dataset_name=self.dataset_name,
-                            metadata=self._metadata(context),
-                        )
-                    ],
-                }
-            )
-        result = self.market_summary_model(context)
-        raw_payload = result.value if isinstance(result, GenericResult) else result.model_dump(mode="json")
-        output_writes = [
-            _artifact_write(
-                output=self.output,
-                key=self.output_key(context),
-                payload=raw_payload,
-                return_type=self.return_type,
-                dataset_name=self.dataset_name,
-                metadata=self._metadata(context),
-                overwrite=self.overwrite_output,
-            )
-        ]
-        return GenericResult(
-            value={
-                **payload,
-                "status": output_writes[0]["status"],
-                "will_call_network": True,
-                "will_publish_output": True,
-                "status_code": getattr(result, "status_code", None),
-                "attempts": getattr(result, "attempts", 1),
-                "rate_limit": getattr(result, "rate_limit", {}),
-                "retry_events": getattr(result, "retry_events", []),
-                "retry_summary": getattr(result, "retry_summary", {}),
-                "output_writes": output_writes,
-            }
-        )
 
-
-class MassiveDailyTickerSummaryExtractModel(CallableModel):
+class MassiveDailyTickerSummaryExtractModel(_MassiveRESTExtractModel):
     summary_model: DailyTickerSummaryModel = Field(default_factory=DailyTickerSummaryModel)
-    output: Optional[Any] = None
-    explain: bool = False
-    return_type: str = "json"
     output_key_prefix: str = "massive/stocks/rest/daily-ticker-summary"
-    overwrite_output: bool = False
     dataset_name: str = "massive-stocks-rest-daily-ticker-summary"
-    provider_name: str = "massive"
 
     @property
     def context_type(self) -> Type[ContextType]:
         return DailyTickerSummaryContext
 
-    @property
-    def result_type(self) -> Type[ResultType]:
-        return GenericResult
+    def _request_model(self) -> DailyTickerSummaryModel:
+        return self.summary_model
 
     def output_key(self, context: DailyTickerSummaryContext) -> str:
         suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
@@ -1424,102 +1255,16 @@ class MassiveDailyTickerSummaryExtractModel(CallableModel):
     def _metadata(self, context: DailyTickerSummaryContext) -> Dict[str, Any]:
         return {"date": _date_value(context.date), "ticker": context.ticker, "provider": self.provider_name}
 
-    def _output_exists(self, context: DailyTickerSummaryContext) -> bool:
-        if self.output is None or self.overwrite_output or not hasattr(self.output, "exists"):
-            return False
-        return self.output.exists(self.output_key(context))
+    def _plan_fields(self, context: DailyTickerSummaryContext) -> Dict[str, Any]:
+        return {"date": _date_value(context.date), "ticker": context.ticker, "adjusted": context.adjusted}
 
-    def _planned_write(self, context: DailyTickerSummaryContext) -> List[Dict[str, Any]]:
-        if self.output is None:
-            return []
-        return [
-            _artifact_write(
-                output=self.output,
-                key=self.output_key(context),
-                payload={},
-                return_type=self.return_type,
-                dataset_name=self.dataset_name,
-                metadata=self._metadata(context),
-                overwrite=self.overwrite_output,
-                dry_run=True,
-            )
-        ]
-
-    def _plan(self, context: DailyTickerSummaryContext) -> Dict[str, Any]:
-        output_key = self.output_key(context)
+    def dataset_metadata(self) -> Dict[str, Any]:
         return {
-            "dataset": self.dataset_name,
-            "provider": self.provider_name,
-            "date": _date_value(context.date),
-            "ticker": context.ticker,
-            "adjusted": context.adjusted,
-            "return_type": self.return_type,
-            "output_key": output_key,
-            "output_uri": _artifact_uri(self.output, output_key) if self.output is not None else None,
-            "output_writes": self._planned_write(context),
-            "required_env": ["MASSIVE_API_KEY"],
-            "will_call_network": False,
-            "will_publish_output": False,
-            "request": safe_request_dump(self.summary_model.build_request(context)),
-            "dataset_metadata": {
-                "name": self.dataset_name,
-                "endpoint": "/v1/open-close/{stocksTicker}/{date}",
-                "partition_keys": ["date", "ticker"],
-                "media_types": [PayloadCodec(format=self.return_type).media_type],
-            },
+            "name": self.dataset_name,
+            "endpoint": "/v1/open-close/{stocksTicker}/{date}",
+            "partition_keys": ["date", "ticker"],
+            "media_types": [PayloadCodec(format=self.return_type).media_type],
         }
-
-    @Flow.call
-    def __call__(self, context: DailyTickerSummaryContext) -> GenericResult:
-        payload = self._plan(context)
-        if self.explain:
-            return GenericResult(value={**payload, "status": "planned"})
-        if self.output is None:
-            raise ValueError("Massive daily ticker summary extract task requires output.")
-        if self._output_exists(context):
-            return GenericResult(
-                value={
-                    **payload,
-                    "status": "exists",
-                    "will_call_network": False,
-                    "output_writes": [
-                        _existing_artifact(
-                            output=self.output,
-                            key=self.output_key(context),
-                            return_type=self.return_type,
-                            dataset_name=self.dataset_name,
-                            metadata=self._metadata(context),
-                        )
-                    ],
-                }
-            )
-        result = self.summary_model(context)
-        raw_payload = result.value if isinstance(result, GenericResult) else result.model_dump(mode="json")
-        output_writes = [
-            _artifact_write(
-                output=self.output,
-                key=self.output_key(context),
-                payload=raw_payload,
-                return_type=self.return_type,
-                dataset_name=self.dataset_name,
-                metadata=self._metadata(context),
-                overwrite=self.overwrite_output,
-            )
-        ]
-        return GenericResult(
-            value={
-                **payload,
-                "status": output_writes[0]["status"],
-                "will_call_network": True,
-                "will_publish_output": True,
-                "status_code": getattr(result, "status_code", None),
-                "attempts": getattr(result, "attempts", 1),
-                "rate_limit": getattr(result, "rate_limit", {}),
-                "retry_events": getattr(result, "retry_events", []),
-                "retry_summary": getattr(result, "retry_summary", {}),
-                "output_writes": output_writes,
-            }
-        )
 
 
 class MassiveDailyTickerSummaryModel(CallableModel):

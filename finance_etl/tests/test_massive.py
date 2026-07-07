@@ -50,6 +50,21 @@ from finance_etl.providers.massive import (
 )
 
 
+class RecordingArtifactOutput:
+    def __init__(self):
+        self.writes = []
+
+    def artifact_uri(self, key):
+        return f"s3://shared/{key}"
+
+    def exists(self, key):
+        return False
+
+    def write(self, key, payload, media_type=None, metadata=None):
+        self.writes.append({"key": key, "payload": payload, "media_type": media_type, "metadata": metadata})
+        return {"status": "written", "object": key}
+
+
 def test_massive_credentials_can_supply_api_key_without_environment(monkeypatch):
     monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
 
@@ -248,6 +263,43 @@ def test_massive_daily_ticker_summary_extract_explain_plans_output_write(monkeyp
     assert payload["output_writes"][0]["status"] == "planned"
 
 
+@pytest.mark.parametrize(
+    ("model", "context", "partitions"),
+    [
+        (
+            MassiveDailyAggregateExtractModel(output=NoOpArtifactStore(), explain=True),
+            DailyAggregateContext(ticker="AAPL", date="2025-01-02"),
+            ["date", "ticker"],
+        ),
+        (
+            MassiveTickerOverviewExtractModel(output=NoOpArtifactStore(), explain=True),
+            TickerOverviewContext(ticker="AAPL", date="2025-01-02"),
+            ["date", "ticker"],
+        ),
+        (
+            MassiveDailyMarketSummaryExtractModel(output=NoOpArtifactStore(), explain=True),
+            DailyMarketSummaryContext(date="2025-01-02"),
+            ["date"],
+        ),
+        (
+            MassiveDailyTickerSummaryExtractModel(output=NoOpArtifactStore(), explain=True),
+            DailyTickerSummaryContext(ticker="AAPL", date="2025-01-02"),
+            ["date", "ticker"],
+        ),
+    ],
+)
+def test_massive_extract_explain_schema_includes_dataset_and_base_models(monkeypatch, model, context, partitions):
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+
+    payload = model(context).value
+
+    assert payload["dataset_metadata"]["name"] == payload["dataset"]
+    assert payload["dataset_metadata"]["partition_keys"] == partitions
+    assert payload["base_models"]["http"] == "ccflow_http.HTTPModel"
+    assert payload["base_models"]["request_model"].startswith("finance_etl.providers.massive.")
+    assert payload["base_models"]["storage"] == ["ccflow_s3.S3ArtifactStore"]
+
+
 def test_massive_ticker_overview_extract_skips_existing_output():
     class FailingOverviewModel(TickerOverviewModel):
         @Flow.call
@@ -306,6 +358,61 @@ def test_massive_daily_aggregate_extract_writes_raw_payload():
     assert output.writes[0]["key"] == "massive/stocks/rest/daily-aggs/json/2025-01-02/AAPL.json"
     assert output.writes[0]["media_type"] == "application/json"
     assert json.loads(output.writes[0]["payload"]) == {"results": [{"c": 42.0}], "ticker": "AAPL"}
+
+
+def test_massive_ticker_overview_extract_writes_raw_payload():
+    class FakeOverviewModel(TickerOverviewModel):
+        @Flow.call
+        def __call__(self, context):
+            return HTTPResult(value={"ticker": context.ticker, "name": "Apple Inc."}, status_code=200, attempts=2)
+
+    output = RecordingArtifactOutput()
+    payload = MassiveTickerOverviewExtractModel(overview_model=FakeOverviewModel(), output=output)(
+        TickerOverviewContext(ticker="AAPL", date="2025-01-02")
+    ).value
+
+    assert payload["status"] == "written"
+    assert payload["attempts"] == 2
+    assert output.writes[0]["key"] == "massive/stocks/rest/ticker-overview/json/2025-01-02/AAPL.json"
+    assert output.writes[0]["media_type"] == "application/json"
+    assert output.writes[0]["metadata"] == {"date": "2025-01-02", "ticker": "AAPL", "provider": "massive"}
+    assert json.loads(output.writes[0]["payload"]) == {"name": "Apple Inc.", "ticker": "AAPL"}
+
+
+def test_massive_daily_market_summary_extract_writes_raw_payload():
+    class FakeMarketSummaryModel(DailyMarketSummaryModel):
+        @Flow.call
+        def __call__(self, context):
+            return HTTPResult(value={"status": "OK", "results": [{"T": "AAPL", "c": 42.0}]}, status_code=200)
+
+    output = RecordingArtifactOutput()
+    payload = MassiveDailyMarketSummaryExtractModel(market_summary_model=FakeMarketSummaryModel(), output=output)(
+        DailyMarketSummaryContext(date="2025-01-02")
+    ).value
+
+    assert payload["status"] == "written"
+    assert output.writes[0]["key"] == "massive/stocks/rest/daily-market-summary/json/2025-01-02.json"
+    assert output.writes[0]["media_type"] == "application/json"
+    assert output.writes[0]["metadata"] == {"date": "2025-01-02", "provider": "massive", "market": "stocks"}
+    assert json.loads(output.writes[0]["payload"]) == {"results": [{"T": "AAPL", "c": 42.0}], "status": "OK"}
+
+
+def test_massive_daily_ticker_summary_extract_writes_raw_payload():
+    class FakeTickerSummaryModel(DailyTickerSummaryModel):
+        @Flow.call
+        def __call__(self, context):
+            return HTTPResult(value={"symbol": context.ticker, "close": 42.0}, status_code=200)
+
+    output = RecordingArtifactOutput()
+    payload = MassiveDailyTickerSummaryExtractModel(summary_model=FakeTickerSummaryModel(), output=output)(
+        DailyTickerSummaryContext(ticker="AAPL", date="2025-01-02")
+    ).value
+
+    assert payload["status"] == "written"
+    assert output.writes[0]["key"] == "massive/stocks/rest/daily-ticker-summary/json/2025-01-02/AAPL.json"
+    assert output.writes[0]["media_type"] == "application/json"
+    assert output.writes[0]["metadata"] == {"date": "2025-01-02", "ticker": "AAPL", "provider": "massive"}
+    assert json.loads(output.writes[0]["payload"]) == {"close": 42.0, "symbol": "AAPL"}
 
 
 def test_massive_daily_aggregate_backfill_builds_business_day_requests(monkeypatch):

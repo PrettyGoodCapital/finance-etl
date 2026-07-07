@@ -19,7 +19,7 @@ Compose the packaged calendar registry with `ccflow-etl`, then point a context a
 
 ```yaml
 defaults:
-    - /backfill: daily
+    - /backfills: default
     - /finance_calendars: default
     - _self_
 
@@ -60,6 +60,8 @@ defaults:
 The config selects `MassiveDailyTickerSummaryModel` for the semantic dataset `massive-daily-ticker-summary`. Provider and schema metadata live on that concrete model. Applications can select `dataset=/datasets/massive/stocks/rest/ticker-summary` and run it through generic tasks such as `task=/tasks/extract`.
 
 `MassiveDailyTickerSummaryModel` accepts an optional generic `ccflow-etl` `ArtifactWriteModel`. Explain runs emit output keys and planned writes without provider I/O; live runs can write raw provider payloads through the configured artifact store.
+
+Massive stock REST wrappers also cover ticker overview (`/v3/reference/tickers/{ticker}`), grouped daily market summary (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), and daily ticker open/close (`/v1/open-close/{ticker}/{date}`). Applications should compose per-ticker extract models through `finance_flow.SymbolFanoutModel` and a selected symbol universe rather than embedding ticker loops in provider models.
 
 ## Documentation
 

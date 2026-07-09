@@ -379,6 +379,27 @@ def test_massive_ticker_overview_extract_writes_raw_payload():
     assert json.loads(output.writes[0]["payload"]) == {"name": "Apple Inc.", "ticker": "AAPL"}
 
 
+def test_massive_ticker_overview_extract_skips_provider_404_without_output_write():
+    class MissingOverviewModel(TickerOverviewModel):
+        @Flow.call
+        def __call__(self, context):
+            raise RuntimeError(f"HTTP GET /v3/reference/tickers/{context.ticker} failed with status 404")
+
+    output = RecordingArtifactOutput()
+    payload = MassiveTickerOverviewExtractModel(overview_model=MissingOverviewModel(), output=output)(
+        TickerOverviewContext(ticker="SCHWPJ", date="2026-07-08")
+    ).value
+
+    assert payload["status"] == "skipped"
+    assert payload["skip_reason"] == "not_found"
+    assert payload["status_code"] == 404
+    assert payload["ticker"] == "SCHWPJ"
+    assert payload["will_call_network"] is True
+    assert payload["will_publish_output"] is False
+    assert payload["output_writes"] == []
+    assert output.writes == []
+
+
 def test_massive_daily_market_summary_extract_writes_raw_payload():
     class FakeMarketSummaryModel(DailyMarketSummaryModel):
         @Flow.call

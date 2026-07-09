@@ -952,6 +952,9 @@ class _MassiveRESTExtractModel(CallableModel):
             )
         ]
 
+    def _request_error_result(self, context: ContextType, payload: Dict[str, Any], exc: RuntimeError) -> Optional[GenericResult]:
+        return None
+
     def _plan(self, context: ContextType) -> Dict[str, Any]:
         output_key = self.output_key(context)
         return {
@@ -992,7 +995,13 @@ class _MassiveRESTExtractModel(CallableModel):
                 }
             )
 
-        result = self._request_model()(context)
+        try:
+            result = self._request_model()(context)
+        except RuntimeError as exc:
+            handled_result = self._request_error_result(context, payload, exc)
+            if handled_result is not None:
+                return handled_result
+            raise
         raw_payload = result.value if isinstance(result, GenericResult) else result.model_dump(mode="json")
         output_writes = self._write_output(context, raw_payload)
         status = output_writes[0]["status"] if output_writes else "written"
@@ -1195,6 +1204,26 @@ class MassiveTickerOverviewExtractModel(_MassiveRESTExtractModel):
 
     def _plan_fields(self, context: TickerOverviewContext) -> Dict[str, Any]:
         return {"date": _date_value(context.date), "ticker": context.ticker}
+
+    def _request_error_result(self, context: TickerOverviewContext, payload: Dict[str, Any], exc: RuntimeError) -> Optional[GenericResult]:
+        if "failed with status 404" not in str(exc):
+            return None
+        return GenericResult(
+            value={
+                **payload,
+                "status": "skipped",
+                "skip_reason": "not_found",
+                "will_call_network": True,
+                "will_publish_output": False,
+                "status_code": 404,
+                "attempts": 1,
+                "rate_limit": {},
+                "retry_events": [],
+                "retry_summary": {},
+                "output_writes": [],
+                "error": str(exc),
+            }
+        )
 
     def dataset_metadata(self) -> Dict[str, Any]:
         return {

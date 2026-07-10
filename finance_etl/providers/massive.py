@@ -1287,6 +1287,26 @@ class MassiveDailyTickerSummaryExtractModel(_MassiveRESTExtractModel):
     def _plan_fields(self, context: DailyTickerSummaryContext) -> Dict[str, Any]:
         return {"date": _date_value(context.date), "ticker": context.ticker, "adjusted": context.adjusted}
 
+    def _request_error_result(self, context: DailyTickerSummaryContext, payload: Dict[str, Any], exc: RuntimeError) -> Optional[GenericResult]:
+        if "failed with status 404" not in str(exc):
+            return None
+        return GenericResult(
+            value={
+                **payload,
+                "status": "skipped",
+                "skip_reason": "not_found",
+                "will_call_network": True,
+                "will_publish_output": False,
+                "status_code": 404,
+                "attempts": 1,
+                "rate_limit": {},
+                "retry_events": [],
+                "retry_summary": {},
+                "output_writes": [],
+                "error": str(exc),
+            }
+        )
+
     def dataset_metadata(self) -> Dict[str, Any]:
         return {
             "name": self.dataset_name,

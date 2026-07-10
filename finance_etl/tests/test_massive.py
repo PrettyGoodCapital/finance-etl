@@ -436,6 +436,27 @@ def test_massive_daily_ticker_summary_extract_writes_raw_payload():
     assert json.loads(output.writes[0]["payload"]) == {"close": 42.0, "symbol": "AAPL"}
 
 
+def test_massive_daily_ticker_summary_extract_skips_provider_404_without_output_write():
+    class MissingTickerSummaryModel(DailyTickerSummaryModel):
+        @Flow.call
+        def __call__(self, context):
+            raise RuntimeError(f"HTTP GET /v1/open-close/{context.ticker}/{context.date} failed with status 404")
+
+    output = RecordingArtifactOutput()
+    payload = MassiveDailyTickerSummaryExtractModel(summary_model=MissingTickerSummaryModel(), output=output)(
+        DailyTickerSummaryContext(ticker="LFAC", date="2026-07-08")
+    ).value
+
+    assert payload["status"] == "skipped"
+    assert payload["skip_reason"] == "not_found"
+    assert payload["status_code"] == 404
+    assert payload["ticker"] == "LFAC"
+    assert payload["will_call_network"] is True
+    assert payload["will_publish_output"] is False
+    assert payload["output_writes"] == []
+    assert output.writes == []
+
+
 def test_massive_daily_aggregate_backfill_builds_business_day_requests(monkeypatch):
     monkeypatch.setenv("MASSIVE_API_KEY", "secret")
 

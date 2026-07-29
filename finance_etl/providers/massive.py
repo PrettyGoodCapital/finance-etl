@@ -1,7 +1,7 @@
 import os
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Type
+from typing import Any, Literal
 
 from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, ResultType
 from ccflow_etl import (
@@ -91,48 +91,48 @@ def _regular_us_stock_market_holidays(start_date: date, end_date: date) -> set[d
 
 
 __all__ = (
-    "MassiveRequestContext",
-    "MarketCalendarContext",
-    "DailyAggregateContext",
-    "TickerOverviewContext",
-    "DailyMarketSummaryContext",
-    "DailyTickerSummaryContext",
-    "MassiveDailyTickerSummaryContext",
-    "MassiveAllTickersContext",
-    "MassiveFlatFileContext",
     "DailyAggregateBackfillContext",
     "DailyAggregateBackfillModel",
-    "MassiveCredentials",
-    "MassiveHTTPModel",
+    "DailyAggregateContext",
+    "DailyAggregateModel",
+    "DailyMarketSummaryContext",
+    "DailyMarketSummaryModel",
+    "DailyTickerSummaryContext",
+    "DailyTickerSummaryModel",
+    "ExchangesModel",
+    "MarketCalendarContext",
     "MarketCalendarModel",
     "MarketHolidaysModel",
-    "ExchangesModel",
-    "TickersContext",
-    "TickersModel",
-    "MassiveDatedSymbolUniverseModel",
+    "MassiveAllStocksDailySummaryModel",
+    "MassiveAllTickersContext",
     "MassiveAllTickersModel",
-    "TickerUniversePlanContext",
-    "TickerUniversePlanModel",
+    "MassiveCredentials",
+    "MassiveDailyAggregateExtractModel",
+    "MassiveDailyMarketSummaryExtractModel",
+    "MassiveDailyTickerSummaryContext",
+    "MassiveDailyTickerSummaryExtractModel",
+    "MassiveDailyTickerSummaryModel",
+    "MassiveDatedSymbolUniverseModel",
+    "MassiveFlatFileContext",
+    "MassiveFlatFileTransferModel",
+    "MassiveHTTPModel",
+    "MassiveRequestContext",
+    "MassiveTickerOverviewExtractModel",
     "StockDataPlanContext",
     "StockDataPlanModel",
+    "TickerOverviewContext",
     "TickerOverviewModel",
-    "DailyMarketSummaryModel",
-    "DailyTickerSummaryModel",
-    "DailyAggregateModel",
-    "MassiveTickerOverviewExtractModel",
-    "MassiveDailyMarketSummaryExtractModel",
-    "MassiveDailyTickerSummaryExtractModel",
-    "MassiveDailyAggregateExtractModel",
-    "MassiveDailyTickerSummaryModel",
-    "MassiveAllStocksDailySummaryModel",
-    "MassiveFlatFileTransferModel",
+    "TickerUniversePlanContext",
+    "TickerUniversePlanModel",
+    "TickersContext",
+    "TickersModel",
 )
 
 MassiveStockFlatFileDataset = Literal["day-aggs", "minute-aggs", "trades", "quotes"]
 MassiveTickerMarket = Literal["crypto", "fx", "indices", "otc", "stocks"]
 MassiveTickerOrder = Literal["asc", "desc"]
 
-_MASSIVE_STOCK_FLAT_FILES: Dict[MassiveStockFlatFileDataset, Dict[str, str]] = {
+_MASSIVE_STOCK_FLAT_FILES: dict[MassiveStockFlatFileDataset, dict[str, str]] = {
     "day-aggs": {
         "path": "us_stocks_sip/day_aggs_v1",
         "description": "Daily aggregate OHLCV CSV gzip flat file for all U.S. equities.",
@@ -153,22 +153,22 @@ _MASSIVE_STOCK_FLAT_FILES: Dict[MassiveStockFlatFileDataset, Dict[str, str]] = {
 
 
 class MassiveCredentials(APITokenCredentials):
-    token_env: Optional[str] = "MASSIVE_API_KEY"
+    token_env: str | None = "MASSIVE_API_KEY"
     query_param: str = "apiKey"
 
-    def api_key(self) -> Optional[str]:
+    def api_key(self) -> str | None:
         return self.resolved_token()
 
 
 class MassiveRequestContext(HTTPRequestContext):
-    api_key: Optional[str] = None
-    credentials: Optional[MassiveCredentials] = None
+    api_key: str | None = None
+    credentials: MassiveCredentials | None = None
 
 
 class MarketCalendarContext(MassiveRequestContext):
     start_date: date
     end_date: date
-    exchange: Optional[str] = None
+    exchange: str | None = None
     holidays: Any = Field(default_factory=list)
     exchanges: Any = Field(default_factory=list)
 
@@ -235,17 +235,17 @@ class MassiveFlatFileContext(DateContext):
 
 
 class TickersContext(MassiveRequestContext):
-    ticker: Optional[str] = None
-    ticker_type: Optional[str] = None
+    ticker: str | None = None
+    ticker_type: str | None = None
     market: MassiveTickerMarket = "stocks"
-    exchange: Optional[str] = None
-    cusip: Optional[str] = None
-    cik: Optional[str] = None
-    search: Optional[str] = None
-    active: Optional[bool] = True
-    active_date: Optional[date] = None
-    order: Optional[MassiveTickerOrder] = None
-    sort: Optional[str] = None
+    exchange: str | None = None
+    cusip: str | None = None
+    cik: str | None = None
+    search: str | None = None
+    active: bool | None = True
+    active_date: date | None = None
+    order: MassiveTickerOrder | None = None
+    sort: str | None = None
     limit: int = Field(default=1000, ge=1, le=1000)
 
     @field_validator("ticker", "ticker_type", "exchange", "cusip", "cik", "search", "sort", mode="before")
@@ -258,7 +258,7 @@ class TickersContext(MassiveRequestContext):
 
 
 class TickerUniversePlanContext(MassiveRequestContext):
-    session_dates: List[date]
+    session_dates: list[date]
     market: str = "stocks"
     active: bool = True
     limit: int = 1000
@@ -267,8 +267,8 @@ class TickerUniversePlanContext(MassiveRequestContext):
 class DailyAggregateBackfillContext(BackfillContext[DailyAggregateContext]):
     ticker: str
     adjusted: bool = True
-    api_key: Optional[str] = None
-    session_dates: Optional[List[date]] = None
+    api_key: str | None = None
+    session_dates: list[date] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -285,7 +285,7 @@ class DailyAggregateBackfillContext(BackfillContext[DailyAggregateContext]):
                 }
         return value
 
-    def step_contexts(self) -> List[DailyAggregateContext]:
+    def step_contexts(self) -> list[DailyAggregateContext]:
         if self.session_dates is None:
             return super().step_contexts()
 
@@ -306,7 +306,7 @@ class DailyAggregateBackfillContext(BackfillContext[DailyAggregateContext]):
 
 class StockDataPlanContext(MassiveRequestContext):
     session_date: date
-    symbols: List[str]
+    symbols: list[str]
     adjusted: bool = True
 
 
@@ -314,13 +314,13 @@ class MassiveHTTPModel(HTTPModel):
     base_url: str = "https://api.massive.com"
     credentials: MassiveCredentials = Field(default_factory=MassiveCredentials)
     api_key_env: str = "MASSIVE_API_KEY"
-    api_key: Optional[str] = None
+    api_key: str | None = None
 
-    def _api_key(self, context: MassiveRequestContext) -> Optional[str]:
+    def _api_key(self, context: MassiveRequestContext) -> str | None:
         context_credentials = context.credentials.api_key() if context.credentials else None
         return context.api_key or context_credentials or self.api_key or self.credentials.api_key() or os.environ.get(self.api_key_env)
 
-    def build_request(self, context: Optional[MassiveRequestContext] = None) -> HTTPRequest:
+    def build_request(self, context: MassiveRequestContext | None = None) -> HTTPRequest:
         context = context or MassiveRequestContext()
         api_key = self._api_key(context)
         if api_key:
@@ -343,17 +343,17 @@ class MarketCalendarModel(CallableModel):
     def result_type(self):
         return GenericResult
 
-    def _holiday_items(self, holidays: Any) -> List[Dict[str, Any]]:
+    def _holiday_items(self, holidays: Any) -> list[dict[str, Any]]:
         if isinstance(holidays, dict):
             return holidays.get("results", [])
         return list(holidays or [])
 
-    def _exchange_items(self, exchanges: Any) -> List[Dict[str, Any]]:
+    def _exchange_items(self, exchanges: Any) -> list[dict[str, Any]]:
         if isinstance(exchanges, dict):
             return exchanges.get("results", [])
         return list(exchanges or [])
 
-    def _exchange_matches(self, exchange_metadata: Dict[str, Any], exchange: str) -> bool:
+    def _exchange_matches(self, exchange_metadata: dict[str, Any], exchange: str) -> bool:
         name = exchange_metadata.get("name")
         exchange_values = {
             exchange_metadata.get("exchange"),
@@ -366,7 +366,7 @@ class MarketCalendarModel(CallableModel):
             exchange_values.add("".join(word[0] for word in name.split() if word and word[0].isalpha()))
         return exchange.casefold() in {str(value).casefold() for value in exchange_values if value is not None}
 
-    def _exchange_is_known(self, exchanges: Any, exchange: Optional[str]) -> bool:
+    def _exchange_is_known(self, exchanges: Any, exchange: str | None) -> bool:
         if exchange is None:
             return True
         exchange_items = self._exchange_items(exchanges)
@@ -374,7 +374,7 @@ class MarketCalendarModel(CallableModel):
             return True
         return any(self._exchange_matches(exchange_metadata, exchange) for exchange_metadata in exchange_items)
 
-    def _holiday_date(self, holiday: Dict[str, Any]) -> Optional[date]:
+    def _holiday_date(self, holiday: dict[str, Any]) -> date | None:
         holiday_date = holiday.get("date")
         if isinstance(holiday_date, date):
             return holiday_date
@@ -382,7 +382,7 @@ class MarketCalendarModel(CallableModel):
             return date.fromisoformat(holiday_date[:10])
         return None
 
-    def _holiday_matches_exchange(self, holiday: Dict[str, Any], exchange: Optional[str]) -> bool:
+    def _holiday_matches_exchange(self, holiday: dict[str, Any], exchange: str | None) -> bool:
         if exchange is None:
             return True
         holiday_exchange = holiday.get("exchange") or holiday.get("market")
@@ -390,7 +390,7 @@ class MarketCalendarModel(CallableModel):
             return True
         return str(holiday_exchange).casefold() == exchange.casefold()
 
-    def _closed_holiday_dates(self, holidays: List[Dict[str, Any]], exchange: Optional[str]) -> set[date]:
+    def _closed_holiday_dates(self, holidays: list[dict[str, Any]], exchange: str | None) -> set[date]:
         closed_dates = set()
         for holiday in holidays:
             if str(holiday.get("status", "")).casefold() != "closed":
@@ -402,7 +402,7 @@ class MarketCalendarModel(CallableModel):
                 closed_dates.add(holiday_date)
         return closed_dates
 
-    def _uses_us_stock_calendar(self, exchanges: Any, exchange: Optional[str]) -> bool:
+    def _uses_us_stock_calendar(self, exchanges: Any, exchange: str | None) -> bool:
         if exchange is None:
             return True
         if exchange.casefold() in {alias.casefold() for alias in _US_STOCK_EXCHANGE_ALIASES}:
@@ -420,7 +420,7 @@ class MarketCalendarModel(CallableModel):
                 return True
         return False
 
-    def session_dates(self, context: MarketCalendarContext) -> List[date]:
+    def session_dates(self, context: MarketCalendarContext) -> list[date]:
         if not self._exchange_is_known(context.exchanges, context.exchange):
             return []
         closed_dates = self._closed_holiday_dates(self._holiday_items(context.holidays), context.exchange)
@@ -446,16 +446,16 @@ class MarketCalendarModel(CallableModel):
 
 class ExchangesModel(MassiveHTTPModel):
     path: str = "/v3/reference/exchanges"
-    query: dict = {"asset_class": "stocks", "locale": "us"}
+    query: dict = Field(default_factory=lambda: {"asset_class": "stocks", "locale": "us"})
 
 
 class TickersModel(MassiveHTTPModel):
     path: str = "/v3/reference/tickers"
-    query: dict = {"market": "stocks", "active": True}
+    query: dict = Field(default_factory=lambda: {"market": "stocks", "active": True})
     paginate: bool = True
     max_pages: int = 1000
 
-    def build_request(self, context: Optional[TickersContext] = None) -> HTTPRequest:
+    def build_request(self, context: TickersContext | None = None) -> HTTPRequest:
         context = context or TickersContext()
         query = {
             **context.query,
@@ -482,27 +482,27 @@ class TickersModel(MassiveHTTPModel):
 class MassiveDatedSymbolUniverseModel(CallableModel):
     tickers_model: TickersModel = Field(default_factory=TickersModel)
     explain: bool = False
-    ticker: Optional[str] = None
-    ticker_type: Optional[str] = None
+    ticker: str | None = None
+    ticker_type: str | None = None
     market: MassiveTickerMarket = "stocks"
-    exchange: Optional[str] = None
-    cusip: Optional[str] = None
-    cik: Optional[str] = None
-    search: Optional[str] = None
-    active: Optional[bool] = True
-    order: Optional[MassiveTickerOrder] = None
-    sort: Optional[str] = "ticker"
+    exchange: str | None = None
+    cusip: str | None = None
+    cik: str | None = None
+    search: str | None = None
+    active: bool | None = True
+    order: MassiveTickerOrder | None = None
+    sort: str | None = "ticker"
     limit: int = Field(default=1000, ge=1, le=1000)
     max_pages: int = Field(default=1000, ge=1)
-    max_symbols: Optional[int] = Field(default=None, ge=1)
+    max_symbols: int | None = Field(default=None, ge=1)
     source: str = "massive-stocks-rest-tickers"
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return MassiveAllTickersContext
 
     @property
-    def result_type(self) -> Type[ResultType]:
+    def result_type(self) -> type[ResultType]:
         return GenericResult
 
     def _tickers_context(self, context: MassiveAllTickersContext) -> TickersContext:
@@ -526,13 +526,13 @@ class MassiveDatedSymbolUniverseModel(CallableModel):
     def _request_model(self) -> TickersModel:
         return self.tickers_model.model_copy(update={"max_pages": self.max_pages})
 
-    def _symbol_values(self, payload: Any) -> List[str]:
+    def _symbol_values(self, payload: Any) -> list[str]:
         items = payload.get("results", []) if isinstance(payload, dict) else payload
         symbols = [item.get("ticker") for item in items or [] if isinstance(item, dict) and item.get("ticker")]
         symbols = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
         return symbols[: self.max_symbols] if self.max_symbols is not None else symbols
 
-    def _plan(self, context: MassiveAllTickersContext) -> Dict[str, Any]:
+    def _plan(self, context: MassiveAllTickersContext) -> dict[str, Any]:
         request_model = self._request_model()
         tickers_context = self._tickers_context(context)
         return {
@@ -580,19 +580,19 @@ class MassiveDatedSymbolUniverseModel(CallableModel):
 
 class MassiveAllTickersModel(CallableModel):
     tickers_model: TickersModel = Field(default_factory=TickersModel)
-    output: Optional[Any] = None
+    output: Any | None = None
     calendar: str = "/calendars/exchange/NYSE"
     explain: bool = False
-    ticker: Optional[str] = None
-    ticker_type: Optional[str] = None
+    ticker: str | None = None
+    ticker_type: str | None = None
     market: MassiveTickerMarket = "stocks"
-    exchange: Optional[str] = None
-    cusip: Optional[str] = None
-    cik: Optional[str] = None
-    search: Optional[str] = None
-    active: Optional[bool] = True
-    order: Optional[MassiveTickerOrder] = None
-    sort: Optional[str] = None
+    exchange: str | None = None
+    cusip: str | None = None
+    cik: str | None = None
+    search: str | None = None
+    active: bool | None = True
+    order: MassiveTickerOrder | None = None
+    sort: str | None = None
     limit: int = Field(default=1000, ge=1, le=1000)
     max_pages: int = Field(default=1000, ge=1)
     output_key_prefix: str = "massive/stocks/rest/all-tickers"
@@ -600,16 +600,16 @@ class MassiveAllTickersModel(CallableModel):
     dataset_name: str = "massive-stocks-rest-all-tickers"
     provider_name: str = "massive"
     provider_type: str = "http"
-    provider_capabilities: List[str] = Field(default_factory=lambda: ["pagination", "http_status_retry", "rate_limit_headers"])
-    provider_retry: Dict[str, Any] = Field(default_factory=lambda: {"retry_status_codes": [429, 500, 502, 503, 504]})
-    provider_rate_limit: Dict[str, Any] = Field(default_factory=lambda: {"source": "provider_headers"})
+    provider_capabilities: list[str] = Field(default_factory=lambda: ["pagination", "http_status_retry", "rate_limit_headers"])
+    provider_retry: dict[str, Any] = Field(default_factory=lambda: {"retry_status_codes": [429, 500, 502, 503, 504]})
+    provider_rate_limit: dict[str, Any] = Field(default_factory=lambda: {"source": "provider_headers"})
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return MassiveAllTickersContext
 
     @property
-    def result_type(self) -> Type[ResultType]:
+    def result_type(self) -> type[ResultType]:
         return GenericResult
 
     def _date_value(self, context: MassiveAllTickersContext) -> str:
@@ -648,7 +648,7 @@ class MassiveAllTickersModel(CallableModel):
             return self.output.uri(key)
         return key
 
-    def dataset_metadata(self) -> Dict[str, Any]:
+    def dataset_metadata(self) -> dict[str, Any]:
         return {
             "name": self.dataset_name,
             "description": "Massive ticker reference payload for all matching stock tickers.",
@@ -671,7 +671,7 @@ class MassiveAllTickersModel(CallableModel):
             },
         }
 
-    def provider_metadata(self) -> Dict[str, Any]:
+    def provider_metadata(self) -> dict[str, Any]:
         return {
             "name": self.provider_name,
             "provider_type": self.provider_type,
@@ -681,7 +681,7 @@ class MassiveAllTickersModel(CallableModel):
             "request_templates": {"all_tickers": "/v3/reference/tickers"},
         }
 
-    def _planned_write(self, context: MassiveAllTickersContext) -> List[Dict[str, Any]]:
+    def _planned_write(self, context: MassiveAllTickersContext) -> list[dict[str, Any]]:
         if self.output is None:
             return []
         writer = ArtifactWriteModel(store=self.output)
@@ -704,7 +704,7 @@ class MassiveAllTickersModel(CallableModel):
             return False
         return self.output.exists(self.output_key(context))
 
-    def _existing_write(self, context: MassiveAllTickersContext) -> List[Dict[str, Any]]:
+    def _existing_write(self, context: MassiveAllTickersContext) -> list[dict[str, Any]]:
         if self.output is None:
             return []
         artifact = ETLArtifact(
@@ -726,7 +726,7 @@ class MassiveAllTickersModel(CallableModel):
             }
         ]
 
-    def _write_output(self, context: MassiveAllTickersContext, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _write_output(self, context: MassiveAllTickersContext, payload: dict[str, Any]) -> list[dict[str, Any]]:
         if self.output is None:
             raise ValueError("Massive all-tickers task requires output.")
         codec = PayloadCodec(format="json")
@@ -748,7 +748,7 @@ class MassiveAllTickersModel(CallableModel):
         )
         return [result.model_dump(mode="json")]
 
-    def _plan(self, context: MassiveAllTickersContext) -> Dict[str, Any]:
+    def _plan(self, context: MassiveAllTickersContext) -> dict[str, Any]:
         tickers_context = self._tickers_context(context)
         request_model = self._request_model()
         output_key = self.output_key(context)
@@ -855,10 +855,10 @@ class TickerUniversePlanModel(CallableModel):
 
 class DailyAggregateModel(MassiveHTTPModel):
     path: str = "/v2/aggs/ticker/{{ ticker }}/range/1/day/{{ date }}/{{ date }}"
-    query: dict = {"sort": "asc", "limit": 50000}
+    query: dict = Field(default_factory=lambda: {"sort": "asc", "limit": 50000})
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return DailyAggregateContext
 
     def build_request(self, context: DailyAggregateContext) -> HTTPRequest:
@@ -867,7 +867,7 @@ class DailyAggregateModel(MassiveHTTPModel):
 
 
 class _MassiveRESTExtractModel(CallableModel):
-    output: Optional[Any] = None
+    output: Any | None = None
     explain: bool = False
     return_type: str = "json"
     output_key_prefix: str
@@ -876,7 +876,7 @@ class _MassiveRESTExtractModel(CallableModel):
     provider_name: str = "massive"
 
     @property
-    def result_type(self) -> Type[ResultType]:
+    def result_type(self) -> type[ResultType]:
         return GenericResult
 
     def _request_model(self) -> CallableModel:
@@ -885,19 +885,19 @@ class _MassiveRESTExtractModel(CallableModel):
     def output_key(self, context: ContextType) -> str:
         raise NotImplementedError
 
-    def _metadata(self, context: ContextType) -> Dict[str, Any]:
+    def _metadata(self, context: ContextType) -> dict[str, Any]:
         raise NotImplementedError
 
-    def _plan_fields(self, context: ContextType) -> Dict[str, Any]:
+    def _plan_fields(self, context: ContextType) -> dict[str, Any]:
         return {}
 
-    def dataset_metadata(self) -> Dict[str, Any]:
+    def dataset_metadata(self) -> dict[str, Any]:
         raise NotImplementedError
 
     def _output_required_message(self) -> str:
         return f"{self.dataset_name} extract task requires output."
 
-    def _base_models(self) -> Dict[str, Any]:
+    def _base_models(self) -> dict[str, Any]:
         request_model = self._request_model()
         return {
             "http": "ccflow_http.HTTPModel",
@@ -905,7 +905,7 @@ class _MassiveRESTExtractModel(CallableModel):
             "storage": ["ccflow_s3.S3ArtifactStore"],
         }
 
-    def _planned_write(self, context: ContextType) -> List[Dict[str, Any]]:
+    def _planned_write(self, context: ContextType) -> list[dict[str, Any]]:
         if self.output is None:
             return []
         return [
@@ -921,7 +921,7 @@ class _MassiveRESTExtractModel(CallableModel):
             )
         ]
 
-    def _existing_write(self, context: ContextType) -> List[Dict[str, Any]]:
+    def _existing_write(self, context: ContextType) -> list[dict[str, Any]]:
         return [
             _existing_artifact(
                 output=self.output,
@@ -937,7 +937,7 @@ class _MassiveRESTExtractModel(CallableModel):
             return False
         return self.output.exists(self.output_key(context))
 
-    def _write_output(self, context: ContextType, payload: Any) -> List[Dict[str, Any]]:
+    def _write_output(self, context: ContextType, payload: Any) -> list[dict[str, Any]]:
         if self.output is None:
             raise ValueError(self._output_required_message())
         return [
@@ -952,10 +952,10 @@ class _MassiveRESTExtractModel(CallableModel):
             )
         ]
 
-    def _request_error_result(self, context: ContextType, payload: Dict[str, Any], exc: RuntimeError) -> Optional[GenericResult]:
+    def _request_error_result(self, context: ContextType, payload: dict[str, Any], exc: RuntimeError) -> GenericResult | None:
         return None
 
-    def _plan(self, context: ContextType) -> Dict[str, Any]:
+    def _plan(self, context: ContextType) -> dict[str, Any]:
         output_key = self.output_key(context)
         return {
             "dataset": self.dataset_name,
@@ -1027,7 +1027,7 @@ class MassiveDailyAggregateExtractModel(_MassiveRESTExtractModel):
     dataset_name: str = "massive-stocks-rest-daily-aggs"
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return DailyAggregateContext
 
     def _request_model(self) -> DailyAggregateModel:
@@ -1040,13 +1040,13 @@ class MassiveDailyAggregateExtractModel(_MassiveRESTExtractModel):
         suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
         return f"{self.output_key_prefix.strip('/')}/{self.return_type}/{self._date_value(context)}/{context.ticker}{suffix}"
 
-    def _metadata(self, context: DailyAggregateContext) -> Dict[str, Any]:
+    def _metadata(self, context: DailyAggregateContext) -> dict[str, Any]:
         return {"date": self._date_value(context), "ticker": context.ticker, "provider": self.provider_name}
 
-    def _plan_fields(self, context: DailyAggregateContext) -> Dict[str, Any]:
+    def _plan_fields(self, context: DailyAggregateContext) -> dict[str, Any]:
         return {"date": self._date_value(context), "ticker": context.ticker, "adjusted": context.adjusted}
 
-    def dataset_metadata(self) -> Dict[str, Any]:
+    def dataset_metadata(self) -> dict[str, Any]:
         return {
             "name": self.dataset_name,
             "endpoint": "/v2/aggs/ticker/{ticker}/range/1/day/{date}/{date}",
@@ -1108,10 +1108,10 @@ def _artifact_write(
     payload: Any,
     return_type: str,
     dataset_name: str,
-    metadata: Dict[str, Any],
+    metadata: dict[str, Any],
     overwrite: bool,
     dry_run: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     codec = PayloadCodec(format=return_type)
     result = ArtifactWriteModel(store=output)(
         ArtifactWriteContext(
@@ -1128,7 +1128,7 @@ def _artifact_write(
     return result.model_dump(mode="json")
 
 
-def _existing_artifact(*, output: Any, key: str, return_type: str, dataset_name: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+def _existing_artifact(*, output: Any, key: str, return_type: str, dataset_name: str, metadata: dict[str, Any]) -> dict[str, Any]:
     artifact = ETLArtifact(
         key=key,
         stage="extract",
@@ -1151,7 +1151,7 @@ class TickerOverviewModel(MassiveHTTPModel):
     path: str = "/v3/reference/tickers/{{ ticker }}"
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return TickerOverviewContext
 
     def build_request(self, context: TickerOverviewContext) -> HTTPRequest:
@@ -1163,7 +1163,7 @@ class DailyMarketSummaryModel(MassiveHTTPModel):
     path: str = "/v2/aggs/grouped/locale/us/market/stocks/{{ date }}"
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return DailyMarketSummaryContext
 
     def build_request(self, context: DailyMarketSummaryContext) -> HTTPRequest:
@@ -1175,7 +1175,7 @@ class DailyTickerSummaryModel(MassiveHTTPModel):
     path: str = "/v1/open-close/{{ ticker }}/{{ date }}"
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return DailyTickerSummaryContext
 
     def build_request(self, context: DailyTickerSummaryContext) -> HTTPRequest:
@@ -1189,7 +1189,7 @@ class MassiveTickerOverviewExtractModel(_MassiveRESTExtractModel):
     dataset_name: str = "massive-stocks-rest-ticker-overview"
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return TickerOverviewContext
 
     def _request_model(self) -> TickerOverviewModel:
@@ -1199,13 +1199,13 @@ class MassiveTickerOverviewExtractModel(_MassiveRESTExtractModel):
         suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
         return f"{self.output_key_prefix.strip('/')}/{self.return_type}/{_date_value(context.date)}/{context.ticker}{suffix}"
 
-    def _metadata(self, context: TickerOverviewContext) -> Dict[str, Any]:
+    def _metadata(self, context: TickerOverviewContext) -> dict[str, Any]:
         return {"date": _date_value(context.date), "ticker": context.ticker, "provider": self.provider_name}
 
-    def _plan_fields(self, context: TickerOverviewContext) -> Dict[str, Any]:
+    def _plan_fields(self, context: TickerOverviewContext) -> dict[str, Any]:
         return {"date": _date_value(context.date), "ticker": context.ticker}
 
-    def _request_error_result(self, context: TickerOverviewContext, payload: Dict[str, Any], exc: RuntimeError) -> Optional[GenericResult]:
+    def _request_error_result(self, context: TickerOverviewContext, payload: dict[str, Any], exc: RuntimeError) -> GenericResult | None:
         if "failed with status 404" not in str(exc):
             return None
         return GenericResult(
@@ -1225,7 +1225,7 @@ class MassiveTickerOverviewExtractModel(_MassiveRESTExtractModel):
             }
         )
 
-    def dataset_metadata(self) -> Dict[str, Any]:
+    def dataset_metadata(self) -> dict[str, Any]:
         return {
             "name": self.dataset_name,
             "endpoint": "/v3/reference/tickers/{ticker}",
@@ -1240,7 +1240,7 @@ class MassiveDailyMarketSummaryExtractModel(_MassiveRESTExtractModel):
     dataset_name: str = "massive-stocks-rest-daily-market-summary"
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return DailyMarketSummaryContext
 
     def _request_model(self) -> DailyMarketSummaryModel:
@@ -1250,13 +1250,13 @@ class MassiveDailyMarketSummaryExtractModel(_MassiveRESTExtractModel):
         suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
         return f"{self.output_key_prefix.strip('/')}/{self.return_type}/{_date_value(context.date)}{suffix}"
 
-    def _metadata(self, context: DailyMarketSummaryContext) -> Dict[str, Any]:
+    def _metadata(self, context: DailyMarketSummaryContext) -> dict[str, Any]:
         return {"date": _date_value(context.date), "provider": self.provider_name, "market": "stocks"}
 
-    def _plan_fields(self, context: DailyMarketSummaryContext) -> Dict[str, Any]:
+    def _plan_fields(self, context: DailyMarketSummaryContext) -> dict[str, Any]:
         return {"date": _date_value(context.date), "adjusted": context.adjusted, "include_otc": context.include_otc}
 
-    def dataset_metadata(self) -> Dict[str, Any]:
+    def dataset_metadata(self) -> dict[str, Any]:
         return {
             "name": self.dataset_name,
             "endpoint": "/v2/aggs/grouped/locale/us/market/stocks/{date}",
@@ -1271,7 +1271,7 @@ class MassiveDailyTickerSummaryExtractModel(_MassiveRESTExtractModel):
     dataset_name: str = "massive-stocks-rest-daily-ticker-summary"
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return DailyTickerSummaryContext
 
     def _request_model(self) -> DailyTickerSummaryModel:
@@ -1281,13 +1281,13 @@ class MassiveDailyTickerSummaryExtractModel(_MassiveRESTExtractModel):
         suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
         return f"{self.output_key_prefix.strip('/')}/{self.return_type}/{_date_value(context.date)}/{context.ticker}{suffix}"
 
-    def _metadata(self, context: DailyTickerSummaryContext) -> Dict[str, Any]:
+    def _metadata(self, context: DailyTickerSummaryContext) -> dict[str, Any]:
         return {"date": _date_value(context.date), "ticker": context.ticker, "provider": self.provider_name}
 
-    def _plan_fields(self, context: DailyTickerSummaryContext) -> Dict[str, Any]:
+    def _plan_fields(self, context: DailyTickerSummaryContext) -> dict[str, Any]:
         return {"date": _date_value(context.date), "ticker": context.ticker, "adjusted": context.adjusted}
 
-    def _request_error_result(self, context: DailyTickerSummaryContext, payload: Dict[str, Any], exc: RuntimeError) -> Optional[GenericResult]:
+    def _request_error_result(self, context: DailyTickerSummaryContext, payload: dict[str, Any], exc: RuntimeError) -> GenericResult | None:
         if "failed with status 404" not in str(exc):
             return None
         return GenericResult(
@@ -1307,7 +1307,7 @@ class MassiveDailyTickerSummaryExtractModel(_MassiveRESTExtractModel):
             }
         )
 
-    def dataset_metadata(self) -> Dict[str, Any]:
+    def dataset_metadata(self) -> dict[str, Any]:
         return {
             "name": self.dataset_name,
             "endpoint": "/v1/open-close/{stocksTicker}/{date}",
@@ -1318,8 +1318,8 @@ class MassiveDailyTickerSummaryExtractModel(_MassiveRESTExtractModel):
 
 class MassiveDailyTickerSummaryModel(CallableModel):
     daily_model: DailyAggregateModel = Field(default_factory=DailyAggregateModel)
-    artifact_writer: Optional[ArtifactWriteModel] = None
-    tickers: List[str] = Field(default_factory=lambda: ["SPY"])
+    artifact_writer: ArtifactWriteModel | None = None
+    tickers: list[str] = Field(default_factory=lambda: ["SPY"])
     calendar: str = "/calendars/exchange/NYSE"
     adjusted: bool = True
     explain: bool = False
@@ -1329,36 +1329,36 @@ class MassiveDailyTickerSummaryModel(CallableModel):
     dataset_description: str = "Massive daily aggregate payloads for configured stock tickers."
     schema_name: str = "massive_daily_aggregate_response"
     schema_version: str = "1"
-    partition_keys: List[str] = Field(default_factory=lambda: ["date", "ticker"])
+    partition_keys: list[str] = Field(default_factory=lambda: ["date", "ticker"])
     cadence: str = "1D"
-    media_types: List[str] = Field(default_factory=lambda: ["application/json"])
-    quality_expectations: List[str] = Field(default_factory=lambda: ["one payload per ticker/date", "provider response status is OK"])
-    output_hints: Dict[str, Any] = Field(
+    media_types: list[str] = Field(default_factory=lambda: ["application/json"])
+    quality_expectations: list[str] = Field(default_factory=lambda: ["one payload per ticker/date", "provider response status is OK"])
+    output_hints: dict[str, Any] = Field(
         default_factory=lambda: {"raw_prefix": "massive/stocks/rest/ticker-summary/{return_type}/{date}/{ticker}.{extension}"}
     )
     provider_name: str = "massive"
     provider_type: str = "http"
-    provider_capabilities: List[str] = Field(
+    provider_capabilities: list[str] = Field(
         default_factory=lambda: ["templated_http_requests", "pagination", "http_status_retry", "rate_limit_headers"]
     )
-    provider_rate_limit: Dict[str, Any] = Field(default_factory=lambda: {"source": "provider_headers"})
-    provider_retry: Dict[str, Any] = Field(default_factory=lambda: {"retry_status_codes": [429, 500, 502, 503, 504]})
-    provider_request_templates: Dict[str, Any] = Field(
+    provider_rate_limit: dict[str, Any] = Field(default_factory=lambda: {"source": "provider_headers"})
+    provider_retry: dict[str, Any] = Field(default_factory=lambda: {"retry_status_codes": [429, 500, 502, 503, 504]})
+    provider_request_templates: dict[str, Any] = Field(
         default_factory=lambda: {"daily_aggregate": "/v2/aggs/ticker/{ticker}/range/1/day/{date}/{date}"}
     )
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return MassiveDailyTickerSummaryContext
 
     @property
-    def result_type(self) -> Type[ResultType]:
+    def result_type(self) -> type[ResultType]:
         return GenericResult
 
-    def _daily_contexts(self, context: MassiveDailyTickerSummaryContext) -> List[DailyAggregateContext]:
+    def _daily_contexts(self, context: MassiveDailyTickerSummaryContext) -> list[DailyAggregateContext]:
         return [DailyAggregateContext(ticker=ticker, date=context.date, adjusted=self.adjusted) for ticker in self.tickers]
 
-    def dataset_metadata(self) -> Dict[str, Any]:
+    def dataset_metadata(self) -> dict[str, Any]:
         return {
             "name": self.dataset_name,
             "description": self.dataset_description,
@@ -1372,7 +1372,7 @@ class MassiveDailyTickerSummaryModel(CallableModel):
             "output_hints": dict(self.output_hints),
         }
 
-    def provider_metadata(self) -> Dict[str, Any]:
+    def provider_metadata(self) -> dict[str, Any]:
         return {
             "name": self.provider_name,
             "provider_type": self.provider_type,
@@ -1388,9 +1388,7 @@ class MassiveDailyTickerSummaryModel(CallableModel):
         extension = "json" if self.return_type == "json" else self.return_type
         return raw_prefix.format(date=date_value, ticker=ticker, return_type=self.return_type, extension=extension)
 
-    def _write_outputs(
-        self, context: MassiveDailyTickerSummaryContext, raw_payloads: Optional[List[Any]] = None, *, dry_run: bool = False
-    ) -> List[Any]:
+    def _write_outputs(self, context: MassiveDailyTickerSummaryContext, raw_payloads: list[Any] | None = None, *, dry_run: bool = False) -> list[Any]:
         if self.artifact_writer is None:
             return []
         raw_payloads = raw_payloads or [{} for _ in self.tickers]
@@ -1454,25 +1452,25 @@ class MassiveDailyTickerSummaryModel(CallableModel):
 class MassiveAllStocksDailySummaryModel(CallableModel):
     tickers_model: Any = Field(default_factory=TickersModel)
     summary_model: MassiveDailyTickerSummaryModel = Field(default_factory=MassiveDailyTickerSummaryModel)
-    output: Optional[Any] = None
+    output: Any | None = None
     explain: bool = False
     market: str = "stocks"
     active: bool = True
     limit: int = 1000
-    max_tickers: Optional[int] = None
+    max_tickers: int | None = None
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return MassiveDailyTickerSummaryContext
 
     @property
-    def result_type(self) -> Type[ResultType]:
+    def result_type(self) -> type[ResultType]:
         return GenericResult
 
     def _tickers_context(self, context: MassiveDailyTickerSummaryContext) -> TickersContext:
         return TickersContext(market=self.market, active=self.active, active_date=context.date, limit=self.limit)
 
-    def _ticker_values(self, payload: Any) -> List[str]:
+    def _ticker_values(self, payload: Any) -> list[str]:
         items = payload.get("results", []) if isinstance(payload, dict) else payload
         tickers = [item.get("ticker") for item in items or [] if isinstance(item, dict) and item.get("ticker")]
         return tickers[: self.max_tickers] if self.max_tickers is not None else tickers
@@ -1519,9 +1517,9 @@ class MassiveAllStocksDailySummaryModel(CallableModel):
 
 class MassiveFlatFileTransferModel(CallableModel):
     dataset: MassiveStockFlatFileDataset = "day-aggs"
-    source_client: Optional[Any] = None
+    source_client: Any | None = None
     source_bucket: str = "flatfiles"
-    output: Optional[Any] = None
+    output: Any | None = None
     output_key_prefix: str = "massive/stocks/flat-files"
     local_dir: Path = Path("/tmp/ccflow-massive-flat-files")
     media_type: str = "application/gzip"
@@ -1529,14 +1527,14 @@ class MassiveFlatFileTransferModel(CallableModel):
     overwrite_output: bool = False
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return MassiveFlatFileContext
 
     @property
-    def result_type(self) -> Type[ResultType]:
+    def result_type(self) -> type[ResultType]:
         return GenericResult
 
-    def dataset_metadata(self) -> Dict[str, Any]:
+    def dataset_metadata(self) -> dict[str, Any]:
         metadata = _MASSIVE_STOCK_FLAT_FILES[self.dataset]
         return {
             "name": f"massive-stocks-flat-files-{self.dataset}",
@@ -1573,7 +1571,7 @@ class MassiveFlatFileTransferModel(CallableModel):
             return self.output.uri(key)
         return key
 
-    def _output_write_record(self, key: str, status: str, metadata: Optional[dict] = None) -> dict:
+    def _output_write_record(self, key: str, status: str, metadata: dict | None = None) -> dict:
         metadata = metadata or {}
         artifact = ETLArtifact(
             key=key,

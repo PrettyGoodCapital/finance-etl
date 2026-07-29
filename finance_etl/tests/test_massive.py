@@ -892,9 +892,9 @@ def test_massive_tickers_model_paginates_next_url(monkeypatch):
 
     class FakeResponse:
         status_code = 200
-        headers = {}
 
         def __init__(self, value, url):
+            self.headers = {}
             self._value = value
             self.url = f"https://api.massive.com{url}"
 
@@ -940,9 +940,9 @@ def test_massive_daily_aggregate_backfill_downloads_each_business_day(monkeypatc
 
     class FakeResponse:
         status_code = 200
-        headers = {}
 
         def __init__(self, url):
+            self.headers = {}
             self.url = f"https://api.massive.com{url}"
             self._url = url
 

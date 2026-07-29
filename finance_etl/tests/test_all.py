@@ -1,4 +1,4 @@
-from finance_etl import *  # noqa
+from finance_etl import *
 
 
 def test_all():

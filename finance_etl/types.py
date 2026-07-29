@@ -1,40 +1,39 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-from typing import Dict, Optional
+from datetime import UTC, date, datetime
 
 from pydantic import BaseModel, Field, model_validator
 
 __all__ = (
-    "SchemaMetadata",
-    "PartitionComputationResult",
-    "ExchangePartitionContext",
-    "MarketPartitionContext",
-    "TickerPartitionContext",
-    "SessionDatePartitionContext",
-    "TickerDatePartitionContext",
-    "PortfolioDatePartitionContext",
-    "StrategyDatePartitionContext",
-    "ReportDatePartitionContext",
-    "InstrumentHandle",
-    "SecurityRecord",
-    "ListingRecord",
-    "ExchangeSessionRecord",
-    "CorporateActionRecord",
-    "PortfolioSnapshot",
     "BacktestResultRecord",
-    "ReportMetadata",
-    "UniverseMember",
-    "SignalRecord",
+    "CorporateActionRecord",
+    "ExchangePartitionContext",
+    "ExchangeSessionRecord",
+    "InstrumentHandle",
+    "ListingRecord",
+    "MarketPartitionContext",
     "OptimizerAllocation",
+    "PartitionComputationResult",
+    "PortfolioDatePartitionContext",
+    "PortfolioSnapshot",
+    "ReportDatePartitionContext",
+    "ReportMetadata",
+    "SchemaMetadata",
+    "SecurityRecord",
+    "SessionDatePartitionContext",
+    "SignalRecord",
+    "StrategyDatePartitionContext",
     "TargetPositionRecord",
+    "TickerDatePartitionContext",
+    "TickerPartitionContext",
+    "UniverseMember",
 )
 
 
 class SchemaMetadata(BaseModel):
     schema_name: str
     schema_version: int = 1
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def is_compatible_with(self, expected_name: str, min_version: int, max_version: int) -> bool:
         if self.schema_name != expected_name:
@@ -53,7 +52,7 @@ class PartitionComputationResult(BaseModel):
     partition_key: str
     as_of_date: date
     row_count: int = 0
-    schema_metadata: Optional[SchemaMetadata] = None
+    schema_metadata: SchemaMetadata | None = None
 
 
 class ExchangePartitionContext(BaseModel):
@@ -63,7 +62,7 @@ class ExchangePartitionContext(BaseModel):
 
 class MarketPartitionContext(BaseModel):
     market: str = "equities"
-    exchange: Optional[str] = None
+    exchange: str | None = None
     as_of_date: date
 
 
@@ -71,7 +70,7 @@ class TickerPartitionContext(BaseModel):
     ticker: str
     exchange: str = "XNYS"
     market: str = "equities"
-    instrument_id: Optional[str] = None
+    instrument_id: str | None = None
 
     @model_validator(mode="after")
     def _default_instrument_id(self):
@@ -89,7 +88,7 @@ class TickerDatePartitionContext(BaseModel):
     ticker: str
     exchange: str = "XNYS"
     as_of_date: date
-    instrument_id: Optional[str] = None
+    instrument_id: str | None = None
 
     @model_validator(mode="after")
     def _default_instrument_id(self):
@@ -117,12 +116,12 @@ class ReportDatePartitionContext(BaseModel):
 class InstrumentHandle(BaseModel):
     symbol: str
     exchange: str = "XNYS"
-    instrument_id: Optional[str] = None
-    vendor_id: Optional[str] = None
+    instrument_id: str | None = None
+    vendor_id: str | None = None
     listing_state: str = "active"
-    effective_time: Optional[datetime] = None
-    knowledge_time: Optional[datetime] = None
-    identifiers: Dict[str, str] = Field(default_factory=dict)
+    effective_time: datetime | None = None
+    knowledge_time: datetime | None = None
+    identifiers: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _default_instrument_id(self):
@@ -135,14 +134,14 @@ class SecurityRecord(BaseModel):
     instrument: InstrumentHandle
     security_type: str = "equity"
     currency: str = "USD"
-    issuer_name: Optional[str] = None
+    issuer_name: str | None = None
 
 
 class ListingRecord(BaseModel):
     instrument_id: str
     exchange: str
-    listed_at: Optional[datetime] = None
-    delisted_at: Optional[datetime] = None
+    listed_at: datetime | None = None
+    delisted_at: datetime | None = None
     active: bool = True
 
 
@@ -157,8 +156,8 @@ class CorporateActionRecord(BaseModel):
     instrument_id: str
     effective_date: date
     action_type: str
-    ratio: Optional[float] = None
-    amount: Optional[float] = None
+    ratio: float | None = None
+    amount: float | None = None
 
 
 class PortfolioSnapshot(BaseModel):
@@ -167,22 +166,22 @@ class PortfolioSnapshot(BaseModel):
     instrument_id: str
     quantity: float
     market_value: float
-    cash_value: Optional[float] = None
+    cash_value: float | None = None
 
 
 class BacktestResultRecord(BaseModel):
     strategy_id: str
     as_of_date: date
     return_pct: float
-    turnover: Optional[float] = None
-    drawdown: Optional[float] = None
+    turnover: float | None = None
+    drawdown: float | None = None
 
 
 class ReportMetadata(BaseModel):
     report_id: str
     report_type: str
     as_of_date: date
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     schema_metadata: SchemaMetadata
 
 
@@ -190,8 +189,8 @@ class UniverseMember(BaseModel):
     as_of_date: date
     symbol: str
     exchange: str = "XNYS"
-    instrument_id: Optional[str] = None
-    close: Optional[float] = None
+    instrument_id: str | None = None
+    close: float | None = None
     currency: str = "USD"
 
     @model_validator(mode="after")
@@ -213,7 +212,7 @@ class OptimizerAllocation(BaseModel):
     as_of_date: date
     instrument_id: str
     weight: float
-    score: Optional[float] = None
+    score: float | None = None
 
 
 class TargetPositionRecord(BaseModel):
@@ -221,5 +220,5 @@ class TargetPositionRecord(BaseModel):
     instrument_id: str
     target_weight: float
     target_notional: float
-    target_quantity: Optional[float] = None
+    target_quantity: float | None = None
     currency: str = "USD"

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Type
 
 import pytest
 from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, ModelRegistry, ResultType
@@ -26,11 +25,11 @@ from finance_etl import (
 
 class EchoFinanceDateModel(CallableModel):
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return DateContext
 
     @property
-    def result_type(self) -> Type[ResultType]:
+    def result_type(self) -> type[ResultType]:
         return GenericResult
 
     @Flow.call

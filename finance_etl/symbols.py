@@ -1,16 +1,16 @@
 import json
 from datetime import date
-from typing import Any, Dict, List, Optional, Type
+from typing import Any
 
 from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, ResultType
 from ccflow_etl import ArtifactReadContext, ArtifactReadModel
 from pydantic import BaseModel, Field, model_validator
 
 __all__ = (
+    "ArtifactSymbolUniverseModel",
+    "ExplicitSymbolUniverseModel",
     "SymbolUniverseContext",
     "SymbolUniverseResult",
-    "ExplicitSymbolUniverseModel",
-    "ArtifactSymbolUniverseModel",
 )
 
 
@@ -27,10 +27,10 @@ class SymbolUniverseContext(DateContext):
 
 class SymbolUniverseResult(BaseModel):
     as_of_date: date
-    symbols: List[str] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=list)
     source: str = "explicit"
-    snapshot_uri: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    snapshot_uri: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def normalize_symbols(self):
@@ -39,16 +39,16 @@ class SymbolUniverseResult(BaseModel):
 
 
 class ExplicitSymbolUniverseModel(CallableModel):
-    symbols: List[str] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=list)
     source: str = "explicit"
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return SymbolUniverseContext
 
     @property
-    def result_type(self) -> Type[ResultType]:
+    def result_type(self) -> type[ResultType]:
         return GenericResult
 
     @Flow.call
@@ -66,17 +66,17 @@ class ExplicitSymbolUniverseModel(CallableModel):
 class ArtifactSymbolUniverseModel(CallableModel):
     store: Any
     key_template: str
-    records_key: Optional[str] = "results"
+    records_key: str | None = "results"
     symbol_field: str = "ticker"
     source: str = "artifact"
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
-    def context_type(self) -> Type[ContextType]:
+    def context_type(self) -> type[ContextType]:
         return SymbolUniverseContext
 
     @property
-    def result_type(self) -> Type[ResultType]:
+    def result_type(self) -> type[ResultType]:
         return GenericResult
 
     def artifact_key(self, context: DateContext) -> str:
@@ -93,7 +93,7 @@ class ArtifactSymbolUniverseModel(CallableModel):
         result = ArtifactReadModel(store=self.store)(ArtifactReadContext(key=key))
         return json.loads(result.payload)
 
-    def _records(self, payload: Any) -> List[Any]:
+    def _records(self, payload: Any) -> list[Any]:
         if self.records_key is None:
             return payload if isinstance(payload, list) else []
         if isinstance(payload, dict):
@@ -101,7 +101,7 @@ class ArtifactSymbolUniverseModel(CallableModel):
             return records if isinstance(records, list) else []
         return []
 
-    def _symbols(self, payload: Any) -> List[str]:
+    def _symbols(self, payload: Any) -> list[str]:
         symbols = []
         for record in self._records(payload):
             if isinstance(record, dict):
@@ -110,7 +110,7 @@ class ArtifactSymbolUniverseModel(CallableModel):
                     symbols.append(str(symbol))
         return symbols
 
-    def _normalized_symbols(self, payload: Any) -> List[str]:
+    def _normalized_symbols(self, payload: Any) -> list[str]:
         return sorted({symbol.strip().upper() for symbol in self._symbols(payload) if symbol.strip()})
 
     @Flow.call

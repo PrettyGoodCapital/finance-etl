@@ -18,6 +18,7 @@ from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 
 from finance_etl.providers.massive import (
+    ConditionsModel,
     DailyAggregateBackfillContext,
     DailyAggregateBackfillModel,
     DailyAggregateContext,
@@ -44,6 +45,8 @@ from finance_etl.providers.massive import (
     MassiveDatedReferenceModel,
     MassiveDatedSymbolUniverseModel,
     MassiveFlatFileTransferModel,
+    MassiveReferenceSnapshotContext,
+    MassiveReferenceSnapshotExtractModel,
     MassiveTickerOverviewBundleExtractModel,
     MassiveTickerOverviewExtractModel,
     TickerOverviewContext,
@@ -133,12 +136,15 @@ def test_massive_market_metadata_models_build_expected_requests(monkeypatch):
 
     holidays = MarketHolidaysModel().build_request()
     exchanges = ExchangesModel().build_request()
+    conditions = ConditionsModel().build_request()
     tickers = TickersModel().build_request()
 
     assert holidays.url == "/v1/marketstatus/upcoming"
     assert holidays.params == {"apiKey": "secret"}
     assert exchanges.url == "/v3/reference/exchanges"
     assert exchanges.params == {"asset_class": "stocks", "locale": "us", "apiKey": "secret"}
+    assert conditions.url == "/v3/reference/conditions"
+    assert conditions.params == {"asset_class": "stocks", "limit": 1000, "apiKey": "secret"}
     assert tickers.url == "/v3/reference/tickers"
     assert tickers.params == {"market": "stocks", "active": True, "limit": 1000, "apiKey": "secret"}
 
@@ -1107,6 +1113,35 @@ def test_massive_dated_reference_extract_writes_one_market_wide_daily_artifact(m
         "reference": "splits",
     }
     assert json.loads(output.writes[0]["payload"])["results"] == [{"execution_date": "2025-01-02", "ticker": "AAPL"}]
+
+
+@pytest.mark.parametrize(
+    ("reference_model", "reference_name"),
+    [
+        (ExchangesModel(), "exchanges"),
+        (ConditionsModel(), "conditions"),
+    ],
+)
+def test_massive_reference_snapshot_plans_one_market_wide_capture(reference_model, reference_name, monkeypatch):
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+    model = MassiveReferenceSnapshotExtractModel(
+        reference_model=reference_model,
+        reference_name=reference_name,
+        output=NoOpArtifactStore(),
+        output_key_prefix=f"massive/stocks/rest/{reference_name}",
+        dataset_name=f"massive-stocks-rest-{reference_name}",
+        explain=True,
+    )
+
+    payload = model(MassiveReferenceSnapshotContext(date="2025-01-02")).value
+
+    assert payload["status"] == "planned"
+    assert payload["capture_date"] == "2025-01-02"
+    assert payload["will_call_network"] is False
+    assert payload["request"]["url"] == reference_model.path
+    assert "ticker" not in payload["request"]["params"]
+    assert payload["output_key"] == f"massive/stocks/rest/{reference_name}/json/2025/01/2025-01-02.json"
+    assert payload["dataset_metadata"]["partition_keys"] == ["capture_date"]
 
 
 def test_massive_daily_aggregate_backfill_downloads_each_business_day(monkeypatch):

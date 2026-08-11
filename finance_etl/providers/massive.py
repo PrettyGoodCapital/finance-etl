@@ -94,6 +94,7 @@ def _regular_us_stock_market_holidays(start_date: date, end_date: date) -> set[d
 
 
 __all__ = (
+    "ConditionsModel",
     "DailyAggregateBackfillContext",
     "DailyAggregateBackfillModel",
     "DailyAggregateContext",
@@ -122,6 +123,8 @@ __all__ = (
     "MassiveFlatFileContext",
     "MassiveFlatFileTransferModel",
     "MassiveHTTPModel",
+    "MassiveReferenceSnapshotContext",
+    "MassiveReferenceSnapshotExtractModel",
     "MassiveRequestContext",
     "MassiveTickerOverviewBundleExtractModel",
     "MassiveTickerOverviewExtractModel",
@@ -231,6 +234,17 @@ class MassiveAllTickersContext(MassiveRequestContext, DateContext):
 
 
 class MassiveDatedReferenceContext(MassiveRequestContext, DateContext):
+    @model_validator(mode="wrap")
+    @classmethod
+    def validate_date_only_context(cls, value, handler, info):
+        if not isinstance(value, (cls, dict)):
+            if isinstance(value, (tuple, list)) and len(value) == 1:
+                value = value[0]
+            value = {"date": value}
+        return handler(value)
+
+
+class MassiveReferenceSnapshotContext(MassiveRequestContext, DateContext):
     @model_validator(mode="wrap")
     @classmethod
     def validate_date_only_context(cls, value, handler, info):
@@ -465,6 +479,13 @@ class MarketCalendarModel(CallableModel):
 class ExchangesModel(MassiveHTTPModel):
     path: str = "/v3/reference/exchanges"
     query: dict = Field(default_factory=lambda: {"asset_class": "stocks", "locale": "us"})
+
+
+class ConditionsModel(MassiveHTTPModel):
+    path: str = "/v3/reference/conditions"
+    query: dict = Field(default_factory=lambda: {"asset_class": "stocks", "limit": 1000})
+    paginate: bool = True
+    max_pages: int = 1000
 
 
 class TickersModel(MassiveHTTPModel):
@@ -1127,6 +1148,45 @@ class MassiveDatedReferenceExtractModel(_MassiveRESTExtractModel):
             "media_types": [PayloadCodec(format=self.return_type).media_type],
             "pagination": {"mode": "next_url", "limit": self.reference_model.limit},
         }
+
+
+class MassiveReferenceSnapshotExtractModel(_MassiveRESTExtractModel):
+    reference_model: MassiveHTTPModel
+    reference_name: str
+
+    @property
+    def context_type(self) -> type[ContextType]:
+        return MassiveReferenceSnapshotContext
+
+    def _request_model(self) -> MassiveHTTPModel:
+        return self.reference_model
+
+    def output_key(self, context: MassiveReferenceSnapshotContext) -> str:
+        value = context.date if isinstance(context.date, date) else date.fromisoformat(str(context.date))
+        suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
+        return f"{self.output_key_prefix.strip('/')}/{self.return_type}/{value:%Y}/{value:%m}/{value.isoformat()}{suffix}"
+
+    def _metadata(self, context: MassiveReferenceSnapshotContext) -> dict[str, Any]:
+        return {
+            "capture_date": _date_value(context.date),
+            "provider": self.provider_name,
+            "market": "stocks",
+            "reference": self.reference_name,
+        }
+
+    def _plan_fields(self, context: MassiveReferenceSnapshotContext) -> dict[str, Any]:
+        return {"capture_date": _date_value(context.date), "reference": self.reference_name}
+
+    def dataset_metadata(self) -> dict[str, Any]:
+        metadata = {
+            "name": self.dataset_name,
+            "endpoint": self.reference_model.path,
+            "partition_keys": ["capture_date"],
+            "media_types": [PayloadCodec(format=self.return_type).media_type],
+        }
+        if self.reference_model.paginate:
+            metadata["pagination"] = {"mode": "next_url"}
+        return metadata
 
 
 class StockDataPlanModel(CallableModel):

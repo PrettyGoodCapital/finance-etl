@@ -39,6 +39,9 @@ from finance_etl.providers.massive import (
     MassiveDailyTickerSummaryContext,
     MassiveDailyTickerSummaryExtractModel,
     MassiveDailyTickerSummaryModel,
+    MassiveDatedReferenceContext,
+    MassiveDatedReferenceExtractModel,
+    MassiveDatedReferenceModel,
     MassiveDatedSymbolUniverseModel,
     MassiveFlatFileTransferModel,
     MassiveTickerOverviewBundleExtractModel,
@@ -1044,6 +1047,66 @@ def test_massive_tickers_model_paginates_next_url(monkeypatch):
     assert calls[1]["params"]["cursor"] == "page-2"
     assert result.pages == 2
     assert result.value["results"] == [{"ticker": "AAA"}, {"ticker": "BBB"}]
+
+
+@pytest.mark.parametrize(
+    ("path", "date_field", "sort"),
+    [
+        ("/stocks/v1/splits", "execution_date", "execution_date.asc,ticker.asc"),
+        ("/stocks/v1/dividends", "ex_dividend_date", "ex_dividend_date.asc,ticker.asc"),
+    ],
+)
+def test_massive_dated_reference_model_queries_all_tickers_for_one_date(path, date_field, sort):
+    model = MassiveDatedReferenceModel(
+        path=path,
+        date_field=date_field,
+        sort=sort,
+        credentials=MassiveCredentials(token="secret"),
+    )
+
+    request = model.build_request(MassiveDatedReferenceContext(date="2025-01-02"))
+
+    assert request.url == path
+    assert request.params[date_field] == "2025-01-02"
+    assert request.params["limit"] == 5000
+    assert request.params["sort"] == sort
+    assert request.params["apiKey"] == "secret"
+    assert "ticker" not in request.params
+
+
+def test_massive_dated_reference_extract_writes_one_market_wide_daily_artifact(monkeypatch):
+    class FakeReferenceModel(MassiveDatedReferenceModel):
+        @Flow.call
+        def __call__(self, context):
+            return HTTPResult(
+                value={"status": "OK", "results": [{"ticker": "AAPL", "execution_date": context.date.isoformat()}]},
+                status_code=200,
+                attempts=1,
+                pages=1,
+            )
+
+    monkeypatch.setenv("MASSIVE_API_KEY", "secret")
+    output = RecordingArtifactOutput()
+    model = MassiveDatedReferenceExtractModel(
+        reference_model=FakeReferenceModel(path="/stocks/v1/splits", date_field="execution_date"),
+        reference_name="splits",
+        output=output,
+        output_key_prefix="massive/stocks/rest/splits",
+        dataset_name="massive-stocks-rest-splits",
+    )
+
+    payload = model(["2025-01-02"]).value
+
+    assert payload["status"] == "written"
+    assert payload["request"]["params"] == {"execution_date": "2025-01-02", "limit": 5000, "apiKey": "***"}
+    assert output.writes[0]["key"] == "massive/stocks/rest/splits/json/2025/01/2025-01-02.json"
+    assert output.writes[0]["metadata"] == {
+        "date": "2025-01-02",
+        "provider": "massive",
+        "market": "stocks",
+        "reference": "splits",
+    }
+    assert json.loads(output.writes[0]["payload"])["results"] == [{"execution_date": "2025-01-02", "ticker": "AAPL"}]
 
 
 def test_massive_daily_aggregate_backfill_downloads_each_business_day(monkeypatch):

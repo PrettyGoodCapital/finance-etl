@@ -115,6 +115,9 @@ __all__ = (
     "MassiveDailyTickerSummaryContext",
     "MassiveDailyTickerSummaryExtractModel",
     "MassiveDailyTickerSummaryModel",
+    "MassiveDatedReferenceContext",
+    "MassiveDatedReferenceExtractModel",
+    "MassiveDatedReferenceModel",
     "MassiveDatedSymbolUniverseModel",
     "MassiveFlatFileContext",
     "MassiveFlatFileTransferModel",
@@ -217,6 +220,17 @@ class MassiveDailyTickerSummaryContext(DateContext):
 
 
 class MassiveAllTickersContext(MassiveRequestContext, DateContext):
+    @model_validator(mode="wrap")
+    @classmethod
+    def validate_date_only_context(cls, value, handler, info):
+        if not isinstance(value, (cls, dict)):
+            if isinstance(value, (tuple, list)) and len(value) == 1:
+                value = value[0]
+            value = {"date": value}
+        return handler(value)
+
+
+class MassiveDatedReferenceContext(MassiveRequestContext, DateContext):
     @model_validator(mode="wrap")
     @classmethod
     def validate_date_only_context(cls, value, handler, info):
@@ -480,6 +494,24 @@ class TickersModel(MassiveHTTPModel):
         query.update({key: value for key, value in optional_params.items() if value is not None})
         if context.active_date is not None:
             query["date"] = context.active_date.isoformat()
+        return super().build_request(context.model_copy(update={"query": query}))
+
+
+class MassiveDatedReferenceModel(MassiveHTTPModel):
+    date_field: str
+    limit: int = Field(default=5000, ge=1, le=5000)
+    sort: str | None = None
+    paginate: bool = True
+    max_pages: int = 1000
+
+    @property
+    def context_type(self) -> type[ContextType]:
+        return MassiveDatedReferenceContext
+
+    def build_request(self, context: MassiveDatedReferenceContext) -> HTTPRequest:
+        query = {**context.query, self.date_field: _date_value(context.date), "limit": self.limit}
+        if self.sort is not None:
+            query["sort"] = self.sort
         return super().build_request(context.model_copy(update={"query": query}))
 
 
@@ -1056,6 +1088,44 @@ class MassiveDailyAggregateExtractModel(_MassiveRESTExtractModel):
             "endpoint": "/v2/aggs/ticker/{ticker}/range/1/day/{date}/{date}",
             "partition_keys": ["date", "ticker"],
             "media_types": [PayloadCodec(format=self.return_type).media_type],
+        }
+
+
+class MassiveDatedReferenceExtractModel(_MassiveRESTExtractModel):
+    reference_model: MassiveDatedReferenceModel
+    reference_name: str
+
+    @property
+    def context_type(self) -> type[ContextType]:
+        return MassiveDatedReferenceContext
+
+    def _request_model(self) -> MassiveDatedReferenceModel:
+        return self.reference_model
+
+    def output_key(self, context: MassiveDatedReferenceContext) -> str:
+        value = context.date if isinstance(context.date, date) else date.fromisoformat(str(context.date))
+        suffix = PayloadCodec(format=self.return_type).suffix or ".bin"
+        return f"{self.output_key_prefix.strip('/')}/{self.return_type}/{value:%Y}/{value:%m}/{value.isoformat()}{suffix}"
+
+    def _metadata(self, context: MassiveDatedReferenceContext) -> dict[str, Any]:
+        return {
+            "date": _date_value(context.date),
+            "provider": self.provider_name,
+            "market": "stocks",
+            "reference": self.reference_name,
+        }
+
+    def _plan_fields(self, context: MassiveDatedReferenceContext) -> dict[str, Any]:
+        return {"date": _date_value(context.date), "reference": self.reference_name}
+
+    def dataset_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.dataset_name,
+            "endpoint": self.reference_model.path,
+            "event_date_field": self.reference_model.date_field,
+            "partition_keys": ["date"],
+            "media_types": [PayloadCodec(format=self.return_type).media_type],
+            "pagination": {"mode": "next_url", "limit": self.reference_model.limit},
         }
 
 

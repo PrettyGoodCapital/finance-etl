@@ -61,7 +61,7 @@ The config selects `MassiveDailyTickerSummaryModel` for the semantic dataset `ma
 
 `MassiveDailyTickerSummaryModel` accepts an optional generic `ccflow-etl` `ArtifactWriteModel`. Explain runs emit output keys and planned writes without provider I/O; live runs can write raw provider payloads through the configured artifact store.
 
-Massive stock REST wrappers also cover ticker overview (`/v3/reference/tickers/{ticker}`), grouped daily market summary (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), and daily ticker open/close (`/v1/open-close/{ticker}/{date}`). Applications should compose per-ticker extract models through `finance_flow.SymbolFanoutModel` and a selected symbol universe rather than embedding ticker loops in provider models.
+Massive stock REST wrappers also cover ticker overview (`/v3/reference/tickers/{ticker}`), grouped daily market summary (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), and daily ticker open/close (`/v1/open-close/{ticker}/{date}`). `MassiveTickerOverviewBundleExtractModel` resolves a dated symbol universe, makes bounded concurrent single-ticker overview requests, resumes local JSONL staging, and publishes one compressed object per date.
 
 ## Documentation
 

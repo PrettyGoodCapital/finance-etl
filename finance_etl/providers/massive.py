@@ -1,4 +1,7 @@
+import gzip
+import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -117,6 +120,7 @@ __all__ = (
     "MassiveFlatFileTransferModel",
     "MassiveHTTPModel",
     "MassiveRequestContext",
+    "MassiveTickerOverviewBundleExtractModel",
     "MassiveTickerOverviewExtractModel",
     "StockDataPlanContext",
     "StockDataPlanModel",
@@ -1232,6 +1236,263 @@ class MassiveTickerOverviewExtractModel(_MassiveRESTExtractModel):
             "partition_keys": ["date", "ticker"],
             "media_types": [PayloadCodec(format=self.return_type).media_type],
         }
+
+
+class MassiveTickerOverviewBundleExtractModel(CallableModel):
+    universe_model: CallableModel
+    overview_model: TickerOverviewModel = Field(default_factory=TickerOverviewModel)
+    output: Any | None = None
+    staging_directory: Path = Path("/tmp/finance-etl/massive-ticker-overview")
+    output_key_prefix: str = "massive/stocks/rest/ticker-overview"
+    dataset_name: str = "massive-stocks-rest-ticker-overview"
+    max_concurrency: int = Field(default=8, ge=1)
+    max_symbols: int | None = Field(default=None, ge=1)
+    explain: bool = False
+    overwrite_output: bool = False
+    media_type: str = "application/gzip"
+
+    @property
+    def context_type(self) -> type[ContextType]:
+        return MassiveAllTickersContext
+
+    @property
+    def result_type(self) -> type[ResultType]:
+        return GenericResult
+
+    def output_key(self, context: MassiveAllTickersContext) -> str:
+        return f"{self.output_key_prefix.strip('/')}/jsonl/{_date_value(context.date)}.jsonl.gz"
+
+    def partial_path(self, context: MassiveAllTickersContext) -> Path:
+        return self.staging_directory / f"{_date_value(context.date)}.jsonl.partial"
+
+    def compressed_path(self, context: MassiveAllTickersContext) -> Path:
+        return self.staging_directory / f"{_date_value(context.date)}.jsonl.gz"
+
+    def dataset_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.dataset_name,
+            "endpoint": "/v3/reference/tickers/{ticker}",
+            "partition_keys": ["date"],
+            "media_types": [self.media_type],
+            "record_format": "jsonl",
+            "compression": "gzip",
+        }
+
+    def _artifact_uri(self, key: str) -> str:
+        return _artifact_uri(self.output, key)
+
+    def _output_write_record(self, key: str, status: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        artifact = ETLArtifact(
+            key=key,
+            stage="extract",
+            dataset=self.dataset_name,
+            uri=self._artifact_uri(key),
+            media_type=self.media_type,
+            status=status,
+            metadata=metadata,
+        )
+        return {
+            "key": key,
+            "uri": artifact.uri,
+            "status": status,
+            "artifact": artifact.model_dump(mode="json"),
+            "metadata": metadata,
+        }
+
+    def _output_exists(self, key: str) -> bool:
+        return bool(self.output is not None and hasattr(self.output, "exists") and self.output.exists(key))
+
+    def _symbols(self, context: MassiveAllTickersContext) -> tuple[list[str], dict[str, Any]]:
+        universe_context = self.universe_model.context_type.model_validate({"date": context.date})
+        result = self.universe_model(universe_context)
+        universe = result.value if isinstance(result, GenericResult) else result
+        if not isinstance(universe, SymbolUniverseResult):
+            universe = SymbolUniverseResult.model_validate(universe)
+        symbols = universe.symbols[: self.max_symbols] if self.max_symbols is not None else universe.symbols
+        return symbols, {
+            "source": universe.source,
+            "snapshot_uri": universe.snapshot_uri,
+            "metadata": universe.metadata,
+        }
+
+    def _load_staged_records(self, path: Path) -> tuple[set[str], dict[str, int]]:
+        completed = set()
+        counts = {"ok": 0, "not_found": 0}
+        if not path.exists():
+            return completed, counts
+        with path.open("rb+") as staged:
+            while True:
+                line_start = staged.tell()
+                line = staged.readline()
+                if not line:
+                    break
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    if staged.read().strip():
+                        raise ValueError(f"Invalid staged ticker overview JSONL at byte {line_start}: {path}") from None
+                    staged.seek(line_start)
+                    staged.truncate()
+                    break
+                ticker = record.get("ticker")
+                status = record.get("status")
+                if ticker and status in counts:
+                    completed.add(str(ticker))
+                    counts[status] += 1
+        return completed, counts
+
+    def _overview_record(self, context: MassiveAllTickersContext, ticker: str) -> dict[str, Any]:
+        ticker_context = TickerOverviewContext(
+            ticker=ticker,
+            date=context.date,
+            api_key=context.api_key,
+            credentials=context.credentials,
+        )
+        try:
+            result = self.overview_model(ticker_context)
+        except RuntimeError as exc:
+            if "failed with status 404" not in str(exc):
+                raise
+            return {
+                "date": _date_value(context.date),
+                "ticker": ticker,
+                "status": "not_found",
+                "status_code": 404,
+                "attempts": 1,
+                "response": None,
+            }
+        response = result.value if isinstance(result, GenericResult) else result.model_dump(mode="json")
+        return {
+            "date": _date_value(context.date),
+            "ticker": ticker,
+            "status": "ok",
+            "status_code": getattr(result, "status_code", None),
+            "attempts": getattr(result, "attempts", 1),
+            "response": response,
+        }
+
+    def _append_records(
+        self,
+        context: MassiveAllTickersContext,
+        path: Path,
+        symbols: list[str],
+        counts: dict[str, int],
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as staged, ThreadPoolExecutor(max_workers=self.max_concurrency) as executor:
+            for offset in range(0, len(symbols), self.max_concurrency):
+                batch = symbols[offset : offset + self.max_concurrency]
+                for record in executor.map(lambda ticker: self._overview_record(context, ticker), batch):
+                    staged.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+                    staged.write("\n")
+                    staged.flush()
+                    counts[record["status"]] += 1
+
+    def _compress(self, source_path: Path, destination_path: Path) -> None:
+        with source_path.open("rb") as source, gzip.open(destination_path, "wb") as destination:
+            while chunk := source.read(1024 * 1024):
+                destination.write(chunk)
+
+    def _publish(self, context: MassiveAllTickersContext, path: Path, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+        if self.output is None:
+            raise ValueError("Massive ticker overview bundle extract requires output.")
+        key = self.output_key(context)
+        if hasattr(self.output, "write_file"):
+            response = self.output.write_file(key, path, media_type=self.media_type, metadata=metadata)
+            response_metadata = response if isinstance(response, dict) else {}
+            status = str(response_metadata.get("status", "written"))
+            return [self._output_write_record(key, status, {**metadata, **response_metadata})]
+        result = ArtifactWriteModel(store=self.output)(
+            ArtifactWriteContext(
+                key=key,
+                payload=path.read_bytes(),
+                media_type=self.media_type,
+                dataset=self.dataset_name,
+                stage="extract",
+                overwrite=self.overwrite_output,
+                metadata=metadata,
+            )
+        )
+        return [result.model_dump(mode="json")]
+
+    def _plan(self, context: MassiveAllTickersContext) -> dict[str, Any]:
+        key = self.output_key(context)
+        metadata = {"date": _date_value(context.date), "provider": "massive", "format": "jsonl", "compression": "gzip"}
+        return {
+            "dataset": self.dataset_name,
+            "provider": "massive",
+            "date": _date_value(context.date),
+            "output_key": key,
+            "output_uri": self._artifact_uri(key),
+            "staging_path": str(self.partial_path(context)),
+            "max_concurrency": self.max_concurrency,
+            "max_symbols": self.max_symbols,
+            "will_call_network": False,
+            "will_publish_output": False,
+            "output_writes": [self._output_write_record(key, "planned", metadata)] if self.output is not None else [],
+            "request_template": safe_request_dump(self.overview_model.build_request(TickerOverviewContext(ticker="{ticker}", date=context.date))),
+            "dataset_metadata": self.dataset_metadata(),
+            "base_models": {
+                "universe": f"{self.universe_model.__class__.__module__}.{self.universe_model.__class__.__name__}",
+                "http": f"{self.overview_model.__class__.__module__}.{self.overview_model.__class__.__name__}",
+                "storage": ["ccflow_s3.S3ArtifactStore"],
+            },
+        }
+
+    @Flow.call
+    def __call__(self, context: MassiveAllTickersContext) -> GenericResult:
+        plan = self._plan(context)
+        if self.explain:
+            return GenericResult(value={**plan, "status": "planned"})
+        if self.output is None:
+            raise ValueError("Massive ticker overview bundle extract requires output.")
+        if not self.overwrite_output and self._output_exists(plan["output_key"]):
+            metadata = {"date": plan["date"], "provider": "massive", "format": "jsonl", "compression": "gzip"}
+            return GenericResult(
+                value={
+                    **plan,
+                    "status": "exists",
+                    "output_writes": [self._output_write_record(plan["output_key"], "exists", metadata)],
+                    "ticker_count": None,
+                    "requested_count": 0,
+                    "resumed_count": 0,
+                }
+            )
+
+        symbols, universe = self._symbols(context)
+        partial_path = self.partial_path(context)
+        compressed_path = self.compressed_path(context)
+        completed, counts = self._load_staged_records(partial_path)
+        missing = [symbol for symbol in symbols if symbol not in completed]
+        self._append_records(context, partial_path, missing, counts)
+        self._compress(partial_path, compressed_path)
+        metadata = {
+            "date": plan["date"],
+            "provider": "massive",
+            "format": "jsonl",
+            "compression": "gzip",
+            "ticker_count": len(symbols),
+            "ok_count": counts["ok"],
+            "not_found_count": counts["not_found"],
+        }
+        output_writes = self._publish(context, compressed_path, metadata)
+        partial_path.unlink(missing_ok=True)
+        compressed_path.unlink(missing_ok=True)
+        return GenericResult(
+            value={
+                **plan,
+                "status": output_writes[0]["status"],
+                "will_call_network": bool(missing),
+                "will_publish_output": True,
+                "ticker_count": len(symbols),
+                "requested_count": len(missing),
+                "resumed_count": len(completed),
+                "ok_count": counts["ok"],
+                "not_found_count": counts["not_found"],
+                "universe": universe,
+                "output_writes": output_writes,
+            }
+        )
 
 
 class MassiveDailyMarketSummaryExtractModel(_MassiveRESTExtractModel):

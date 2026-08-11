@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from datetime import date
 
@@ -40,6 +41,7 @@ from finance_etl.providers.massive import (
     MassiveDailyTickerSummaryModel,
     MassiveDatedSymbolUniverseModel,
     MassiveFlatFileTransferModel,
+    MassiveTickerOverviewBundleExtractModel,
     MassiveTickerOverviewExtractModel,
     TickerOverviewContext,
     TickerOverviewModel,
@@ -48,6 +50,7 @@ from finance_etl.providers.massive import (
     TickerUniversePlanContext,
     TickerUniversePlanModel,
 )
+from finance_etl.symbols import ExplicitSymbolUniverseModel
 
 
 class RecordingArtifactOutput:
@@ -398,6 +401,114 @@ def test_massive_ticker_overview_extract_skips_provider_404_without_output_write
     assert payload["will_publish_output"] is False
     assert payload["output_writes"] == []
     assert output.writes == []
+
+
+def test_massive_ticker_overview_bundle_explain_plans_one_daily_output(tmp_path):
+    output = RecordingArtifactOutput()
+    model = MassiveTickerOverviewBundleExtractModel(
+        universe_model=ExplicitSymbolUniverseModel(symbols=["AAPL", "MSFT"]),
+        output=output,
+        staging_directory=tmp_path,
+        explain=True,
+    )
+
+    payload = model(["2025-01-02"]).value
+
+    assert payload["status"] == "planned"
+    assert payload["will_call_network"] is False
+    assert payload["output_key"] == "massive/stocks/rest/ticker-overview/jsonl/2025-01-02.jsonl.gz"
+    assert payload["request_template"]["url"] == "/v3/reference/tickers/{ticker}"
+    assert payload["dataset_metadata"]["partition_keys"] == ["date"]
+    assert len(payload["output_writes"]) == 1
+    assert output.writes == []
+
+
+def test_massive_ticker_overview_bundle_skips_existing_daily_output(tmp_path):
+    class ExistingOutput(RecordingArtifactOutput):
+        def exists(self, key):
+            return True
+
+    class UnexpectedOverviewModel(TickerOverviewModel):
+        @Flow.call
+        def __call__(self, context):
+            raise AssertionError("existing daily output must skip Massive requests")
+
+    output = ExistingOutput()
+    model = MassiveTickerOverviewBundleExtractModel(
+        universe_model=ExplicitSymbolUniverseModel(symbols=["AAPL"]),
+        overview_model=UnexpectedOverviewModel(),
+        output=output,
+        staging_directory=tmp_path,
+    )
+
+    payload = model(["2025-01-02"]).value
+
+    assert payload["status"] == "exists"
+    assert payload["requested_count"] == 0
+    assert payload["will_call_network"] is False
+    assert payload["will_publish_output"] is False
+    assert output.writes == []
+
+
+def test_massive_ticker_overview_bundle_resumes_staging_and_uploads_once(tmp_path):
+    calls = []
+
+    class FakeOverviewModel(TickerOverviewModel):
+        @Flow.call
+        def __call__(self, context):
+            calls.append(context.ticker)
+            if context.ticker == "MSFT":
+                raise RuntimeError("HTTP GET /v3/reference/tickers/MSFT failed with status 404")
+            return HTTPResult(value={"results": {"ticker": context.ticker, "name": f"{context.ticker} Inc."}}, status_code=200)
+
+    class RecordingFileOutput(RecordingArtifactOutput):
+        def write_file(self, key, path, media_type=None, metadata=None):
+            self.writes.append({"key": key, "payload": path.read_bytes(), "media_type": media_type, "metadata": metadata})
+            return {"status": "written", "object": key, "size": path.stat().st_size}
+
+    partial_path = tmp_path / "2025-01-02.jsonl.partial"
+    partial_path.write_text(
+        json.dumps(
+            {
+                "date": "2025-01-02",
+                "ticker": "AAPL",
+                "status": "ok",
+                "status_code": 200,
+                "attempts": 1,
+                "response": {"results": {"ticker": "AAPL", "name": "Apple Inc."}},
+            }
+        )
+        + "\n"
+    )
+    output = RecordingFileOutput()
+    model = MassiveTickerOverviewBundleExtractModel(
+        universe_model=ExplicitSymbolUniverseModel(symbols=["MSFT", "AAPL", "NVDA"]),
+        overview_model=FakeOverviewModel(),
+        output=output,
+        staging_directory=tmp_path,
+        max_concurrency=2,
+    )
+
+    payload = model(["2025-01-02"]).value
+    records = [json.loads(line) for line in gzip.decompress(output.writes[0]["payload"]).splitlines()]
+
+    assert payload["status"] == "written"
+    assert payload["ticker_count"] == 3
+    assert payload["requested_count"] == 2
+    assert payload["resumed_count"] == 1
+    assert payload["ok_count"] == 2
+    assert payload["not_found_count"] == 1
+    assert calls == ["MSFT", "NVDA"]
+    assert len(output.writes) == 1
+    assert output.writes[0]["key"] == "massive/stocks/rest/ticker-overview/jsonl/2025-01-02.jsonl.gz"
+    assert output.writes[0]["media_type"] == "application/gzip"
+    assert [(record["ticker"], record["status"]) for record in records] == [
+        ("AAPL", "ok"),
+        ("MSFT", "not_found"),
+        ("NVDA", "ok"),
+    ]
+    assert not partial_path.exists()
+    assert not (tmp_path / "2025-01-02.jsonl.gz").exists()
 
 
 def test_massive_daily_market_summary_extract_writes_raw_payload():

@@ -2,7 +2,7 @@ import json
 from datetime import date
 from typing import Any
 
-from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, ResultType
+from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList, ResultType
 from ccflow_etl import ArtifactReadContext, ArtifactReadModel
 from pydantic import BaseModel, Field, model_validator
 
@@ -70,6 +70,10 @@ class ArtifactSymbolUniverseModel(CallableModel):
     symbol_field: str = "ticker"
     source: str = "artifact"
     metadata: dict[str, Any] = Field(default_factory=dict)
+    source_model: CallableModel | None = Field(
+        default=None,
+        description="Model that produces the artifact for a date. It is declared as a dependency and called before the artifact is read.",
+    )
 
     @property
     def context_type(self) -> type[ContextType]:
@@ -113,8 +117,17 @@ class ArtifactSymbolUniverseModel(CallableModel):
     def _normalized_symbols(self, payload: Any) -> list[str]:
         return sorted({symbol.strip().upper() for symbol in self._symbols(payload) if symbol.strip()})
 
+    def _source_context(self, context: DateContext) -> ContextType:
+        return self.source_model.context_type.model_validate({"date": context.date})
+
+    @Flow.deps
+    def __deps__(self, context: DateContext) -> GraphDepList:
+        return [(self.source_model, [self._source_context(context)])] if self.source_model is not None else []
+
     @Flow.call
     def __call__(self, context: DateContext) -> GenericResult:
+        if self.source_model is not None:
+            self.source_model(self._source_context(context))
         key = self.artifact_key(context)
         payload = self._payload(key)
         records = self._records(payload)

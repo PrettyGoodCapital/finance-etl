@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, ResultType
+from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList, ResultType
 from ccflow_etl import (
     APITokenCredentials,
     ArtifactWriteContext,
@@ -1432,9 +1432,11 @@ class MassiveTickerOverviewBundleExtractModel(CallableModel):
     def _output_exists(self, key: str) -> bool:
         return bool(self.output is not None and hasattr(self.output, "exists") and self.output.exists(key))
 
+    def _universe_context(self, context: MassiveAllTickersContext) -> ContextType:
+        return self.universe_model.context_type.model_validate({"date": context.date})
+
     def _symbols(self, context: MassiveAllTickersContext) -> tuple[list[str], dict[str, Any]]:
-        universe_context = self.universe_model.context_type.model_validate({"date": context.date})
-        result = self.universe_model(universe_context)
+        result = self.universe_model(self._universe_context(context))
         universe = result.value if isinstance(result, GenericResult) else result
         if not isinstance(universe, SymbolUniverseResult):
             universe = SymbolUniverseResult.model_validate(universe)
@@ -1570,6 +1572,12 @@ class MassiveTickerOverviewBundleExtractModel(CallableModel):
                 "storage": ["ccflow_s3.S3ArtifactStore"],
             },
         }
+
+    @Flow.deps
+    def __deps__(self, context: MassiveAllTickersContext) -> GraphDepList:
+        if self.explain or self.output is None or (not self.overwrite_output and self._output_exists(self.output_key(context))):
+            return []
+        return [(self.universe_model, [self._universe_context(context)])]
 
     @Flow.call
     def __call__(self, context: MassiveAllTickersContext) -> GenericResult:

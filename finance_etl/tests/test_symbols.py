@@ -1,6 +1,8 @@
-from __future__ import annotations
+import pytest
+from ccflow import CallableModel, DateContext, Flow, FlowOptionsOverride, GenericResult
+from ccflow.evaluators import GraphEvaluator, MemoryCacheEvaluator, MultiEvaluator
 
-from finance_etl import ArtifactSymbolUniverseModel
+from finance_etl import ArtifactSymbolUniverseModel, SymbolUniverseContext
 
 
 class FakeArtifactStore:
@@ -49,3 +51,51 @@ def test_artifact_symbol_universe_can_read_root_list_payload():
     assert result.symbols == ["QQQ", "SPY"]
     assert result.metadata["record_count"] == 2
     assert result.metadata["ticker_count"] == 2
+
+
+SOURCE_CALLS: list[str] = []
+SOURCE_ARTIFACTS: dict[str, bytes] = {}
+
+
+class SourceArtifactStore:
+    def read(self, key: str) -> bytes:
+        return SOURCE_ARTIFACTS[key]
+
+
+class WritingSourceModel(CallableModel):
+    @Flow.call
+    def __call__(self, context: DateContext) -> GenericResult:
+        SOURCE_CALLS.append(context.date.isoformat())
+        SOURCE_ARTIFACTS[f"massive/stocks/rest/all-tickers/{context.date.isoformat()}.json"] = b'{"results":[{"ticker":"NVDA"}]}'
+        return GenericResult(value={"status": "written"})
+
+
+def test_artifact_symbol_universe_declares_and_runs_source_model_before_reading():
+    SOURCE_CALLS.clear()
+    SOURCE_ARTIFACTS.clear()
+    store = SourceArtifactStore()
+    source = WritingSourceModel()
+    model = ArtifactSymbolUniverseModel(store=store, key_template="massive/stocks/rest/all-tickers/{date}.json", source_model=source)
+
+    deps = model.__deps__(SymbolUniverseContext(date="2025-01-02"))
+    result = model(["2025-01-02"]).value
+
+    assert [(dep_model, [ctx.date.isoformat() for ctx in contexts]) for dep_model, contexts in deps] == [(source, ["2025-01-02"])]
+    assert result.symbols == ["NVDA"]
+    assert SOURCE_CALLS == ["2025-01-02"]
+
+
+@pytest.mark.parametrize("cacheable", [True, False])
+def test_artifact_symbol_universe_source_model_runs_under_graph_evaluator(cacheable):
+    SOURCE_CALLS.clear()
+    SOURCE_ARTIFACTS.clear()
+    store = SourceArtifactStore()
+    source = WritingSourceModel()
+    model = ArtifactSymbolUniverseModel(store=store, key_template="massive/stocks/rest/all-tickers/{date}.json", source_model=source)
+    evaluator = MultiEvaluator(evaluators=[GraphEvaluator(), MemoryCacheEvaluator()])
+
+    with FlowOptionsOverride(options={"evaluator": evaluator, "cacheable": cacheable}):
+        result = model(["2025-01-02"]).value
+
+    assert result.symbols == ["NVDA"]
+    assert SOURCE_CALLS == ["2025-01-02"] * (1 if cacheable else 2)

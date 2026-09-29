@@ -432,6 +432,25 @@ def test_massive_ticker_overview_bundle_explain_plans_one_daily_output(tmp_path)
     assert output.writes == []
 
 
+def test_massive_ticker_overview_bundle_declares_universe_dependency_only_when_fetching(tmp_path):
+    class ExistingOutput(RecordingArtifactOutput):
+        def exists(self, key):
+            return True
+
+    universe = ExplicitSymbolUniverseModel(symbols=["AAPL"])
+    context = MassiveAllTickersContext(date="2025-01-02")
+
+    def bundle(**kwargs):
+        return MassiveTickerOverviewBundleExtractModel(universe_model=universe, staging_directory=tmp_path, **kwargs)
+
+    deps = bundle(output=RecordingArtifactOutput()).__deps__(context)
+
+    assert [(model, [ctx.date.isoformat() for ctx in contexts]) for model, contexts in deps] == [(universe, ["2025-01-02"])]
+    assert bundle(output=ExistingOutput()).__deps__(context) == []
+    assert bundle(output=ExistingOutput(), overwrite_output=True).__deps__(context) != []
+    assert bundle(output=RecordingArtifactOutput(), explain=True).__deps__(context) == []
+
+
 def test_massive_ticker_overview_bundle_skips_existing_daily_output(tmp_path):
     class ExistingOutput(RecordingArtifactOutput):
         def exists(self, key):

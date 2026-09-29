@@ -1483,6 +1483,8 @@ class MassiveTickerOverviewBundleExtractModel(CallableModel):
         except RuntimeError as exc:
             if "failed with status 404" not in str(exc):
                 raise
+            result = None
+        if result is None or getattr(result, "status_code", None) == 404:
             return {
                 "date": _date_value(context.date),
                 "ticker": ticker,

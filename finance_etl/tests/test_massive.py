@@ -520,6 +520,35 @@ def test_massive_ticker_overview_bundle_resumes_staging_and_uploads_once(tmp_pat
     assert not (tmp_path / "2025-01-02.jsonl.gz").exists()
 
 
+def test_massive_ticker_overview_bundle_records_accepted_404_result_as_not_found(tmp_path):
+    class FakeOverviewModel(TickerOverviewModel):
+        @Flow.call
+        def __call__(self, context):
+            if context.ticker == "MSFT":
+                return HTTPResult(value=None, status_code=404)
+            return HTTPResult(value={"results": {"ticker": context.ticker}}, status_code=200)
+
+    class RecordingFileOutput(RecordingArtifactOutput):
+        def write_file(self, key, path, media_type=None, metadata=None):
+            self.writes.append({"key": key, "payload": path.read_bytes(), "media_type": media_type, "metadata": metadata})
+            return {"status": "written", "object": key, "size": path.stat().st_size}
+
+    output = RecordingFileOutput()
+    model = MassiveTickerOverviewBundleExtractModel(
+        universe_model=ExplicitSymbolUniverseModel(symbols=["AAPL", "MSFT"]),
+        overview_model=FakeOverviewModel(),
+        output=output,
+        staging_directory=tmp_path,
+    )
+
+    payload = model(["2025-01-02"]).value
+    records = [json.loads(line) for line in gzip.decompress(output.writes[0]["payload"]).splitlines()]
+
+    assert payload["ok_count"] == 1
+    assert payload["not_found_count"] == 1
+    assert [(record["ticker"], record["status"], record["status_code"]) for record in records] == [("AAPL", "ok", 200), ("MSFT", "not_found", 404)]
+
+
 def test_massive_daily_market_summary_extract_writes_raw_payload():
     class FakeMarketSummaryModel(DailyMarketSummaryModel):
         @Flow.call

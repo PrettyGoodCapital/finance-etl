@@ -1492,7 +1492,7 @@ class MassiveTickerOverviewBundleExtractModel(CallableModel):
                 "ticker": ticker,
                 "status": "not_found",
                 "status_code": 404,
-                "attempts": 1,
+                "attempts": getattr(result, "attempts", 1),
                 "response": None,
             }
         response = result.value if isinstance(result, GenericResult) else result.model_dump(mode="json")

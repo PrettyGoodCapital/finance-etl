@@ -544,7 +544,7 @@ def test_massive_ticker_overview_bundle_records_accepted_404_result_as_not_found
         @Flow.call
         def __call__(self, context):
             if context.ticker == "MSFT":
-                return HTTPResult(value=None, status_code=404)
+                return HTTPResult(value=None, status_code=404, attempts=2)
             return HTTPResult(value={"results": {"ticker": context.ticker}}, status_code=200)
 
     class RecordingFileOutput(RecordingArtifactOutput):
@@ -565,7 +565,10 @@ def test_massive_ticker_overview_bundle_records_accepted_404_result_as_not_found
 
     assert payload["ok_count"] == 1
     assert payload["not_found_count"] == 1
-    assert [(record["ticker"], record["status"], record["status_code"]) for record in records] == [("AAPL", "ok", 200), ("MSFT", "not_found", 404)]
+    assert [(record["ticker"], record["status"], record["status_code"], record["attempts"]) for record in records] == [
+        ("AAPL", "ok", 200, 1),
+        ("MSFT", "not_found", 404, 2),
+    ]
 
 
 def test_massive_daily_market_summary_extract_writes_raw_payload():

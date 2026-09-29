@@ -1092,7 +1092,7 @@ def test_massive_tickers_model_paginates_next_url(monkeypatch):
             return FakeResponse(value={"results": [{"ticker": "BBB"}]}, url=kwargs["url"])
 
     monkeypatch.setenv("MASSIVE_API_KEY", "secret")
-    monkeypatch.setattr("ccflow_http.base.httpx.Client", FakeClient)
+    monkeypatch.setattr("ccflow_http.base.httpx2.Client", FakeClient)
 
     result = TickersModel()(TickersContext(active_date=date(2024, 1, 2)))
 
@@ -1224,7 +1224,7 @@ def test_massive_daily_aggregate_backfill_downloads_each_business_day(monkeypatc
             calls.append(kwargs)
             return FakeResponse(kwargs["url"])
 
-    monkeypatch.setattr("ccflow_http.base.httpx.Client", FakeClient)
+    monkeypatch.setattr("ccflow_http.base.httpx2.Client", FakeClient)
 
     context = DailyAggregateBackfillContext(
         ticker="AAA",

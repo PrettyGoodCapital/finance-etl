@@ -1,5 +1,6 @@
 import gzip
 import json
+from datetime import date
 
 import httpx2
 from ccflow_etl import LocalFileOutput
@@ -137,3 +138,14 @@ def test_filer_refresh_resumes_staged_records(tmp_path):
 
     fetched = [request.url.path for request in seen if "CIK" in request.url.path]
     assert fetched == ["/api/xbrl/companyfacts/CIK0001652044.json", "/submissions/CIK0001652044.json"]
+
+
+def test_us_federal_calendar_skips_federal_holidays_that_exchanges_observe_differently():
+    from finance_etl import USFederalCalendar
+
+    days = USFederalCalendar().business_days(date(2026, 10, 9), date(2026, 11, 12))
+
+    assert date(2026, 10, 12) not in days  # Columbus Day: federal holiday, NYSE open
+    assert date(2026, 11, 11) not in days  # Veterans Day
+    assert date(2026, 10, 9) in days and date(2026, 10, 13) in days
+    assert USFederalCalendar().business_days(date(2026, 4, 3), date(2026, 4, 3)) == [date(2026, 4, 3)]  # Good Friday: NYSE closed, agencies open

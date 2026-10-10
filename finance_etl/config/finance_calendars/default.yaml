@@ -24,6 +24,9 @@ us:
   _target_: finance_etl.CountryCalendar
   code: US
 
+us_federal:
+  _target_: finance_etl.USFederalCalendar
+
 japan:
   _target_: finance_etl.CountryCalendar
   code: JP

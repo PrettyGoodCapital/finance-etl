@@ -18,6 +18,7 @@ __all__ = (
     "ExchangeSessionStartCalendar",
     "FinanceDatesCalendar",
     "RegionCalendar",
+    "USFederalCalendar",
 )
 
 
@@ -285,6 +286,24 @@ class RegionCalendar(FinanceDatesCalendar):
 
 class CountryCalendar(RegionCalendar):
     code: str = "US"
+
+
+class USFederalCalendar(FinanceDatesCalendar):
+    """US federal business days: weekdays that are not federal holidays, as observed by agencies such as the SEC."""
+
+    code: str = "USFED"
+
+    def business_days(self, start: date, end: date) -> list[date]:
+        from pandas import date_range
+        from pandas.tseries.holiday import USFederalHolidayCalendar
+        from pandas.tseries.offsets import CustomBusinessDay
+
+        if start > end:
+            return []
+        return [value.date() for value in date_range(start, end, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()))]
+
+    def days(self, start: date, end: date) -> list[date]:
+        return self.business_days(start, end)
 
 
 class CountryCalendarRegistry(ModelRegistry):

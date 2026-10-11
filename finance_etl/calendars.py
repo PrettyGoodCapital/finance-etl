@@ -292,6 +292,7 @@ class USFederalCalendar(FinanceDatesCalendar):
     """US federal business days: weekdays that are not federal holidays, as observed by agencies such as the SEC."""
 
     code: str = "USFED"
+    closures: list[date] = Field(default_factory=list, description="Additional federal closures, such as executive-order closures and days of mourning.")
 
     def business_days(self, start: date, end: date) -> list[date]:
         from pandas import date_range
@@ -300,7 +301,9 @@ class USFederalCalendar(FinanceDatesCalendar):
 
         if start > end:
             return []
-        return [value.date() for value in date_range(start, end, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()))]
+        closed = set(self.closures)
+        days = date_range(start, end, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()))
+        return [value.date() for value in days if value.date() not in closed]
 
     def days(self, start: date, end: date) -> list[date]:
         return self.business_days(start, end)

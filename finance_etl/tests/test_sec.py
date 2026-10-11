@@ -149,3 +149,12 @@ def test_us_federal_calendar_skips_federal_holidays_that_exchanges_observe_diffe
     assert date(2026, 11, 11) not in days  # Veterans Day
     assert date(2026, 10, 9) in days and date(2026, 10, 13) in days
     assert USFederalCalendar().business_days(date(2026, 4, 3), date(2026, 4, 3)) == [date(2026, 4, 3)]  # Good Friday: NYSE closed, agencies open
+
+
+def test_us_federal_calendar_excludes_configured_closures():
+    from finance_etl import USFederalCalendar
+
+    calendar = USFederalCalendar(closures=[date(2025, 1, 9)])
+
+    assert date(2025, 1, 9) not in calendar.business_days(date(2025, 1, 6), date(2025, 1, 10))
+    assert date(2025, 1, 8) in calendar.business_days(date(2025, 1, 6), date(2025, 1, 10))

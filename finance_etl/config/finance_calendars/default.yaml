@@ -26,6 +26,12 @@ us:
 
 us_federal:
   _target_: finance_etl.USFederalCalendar
+  # Executive-order closures and national days of mourning, on which EDGAR publishes nothing.
+  closures:
+    - "2024-12-24"
+    - "2025-01-09"
+    - "2025-12-24"
+    - "2025-12-26"
 
 japan:
   _target_: finance_etl.CountryCalendar

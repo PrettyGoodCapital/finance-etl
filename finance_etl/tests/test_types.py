@@ -35,6 +35,7 @@ def test_instrument_handle_defaults_are_generic_and_stable():
 
 def test_universe_member_and_signal_types_round_trip_dates():
     member = UniverseMember(symbol="AAPL", exchange="XNYS", as_of_date="2024-01-03", close=184.95)
+    assert member.instrument_id is not None
 
     signal = SignalRecord(as_of_date="2024-01-03", instrument_id=member.instrument_id, value=0.12)
 
@@ -61,6 +62,7 @@ def test_optimizer_and_target_position_types_capture_allocations():
 
 def test_expanded_generic_record_types_are_constructible():
     instrument = InstrumentHandle(symbol="AAPL", exchange="XNYS")
+    assert instrument.instrument_id is not None
     security = SecurityRecord(instrument=instrument, security_type="equity", currency="USD", issuer_name="Apple Inc")
     listing = ListingRecord(instrument_id=instrument.instrument_id, exchange="XNYS", active=True)
 
@@ -111,6 +113,7 @@ def test_partition_context_and_result_types_are_constructible():
     session = SessionDatePartitionContext(session_date="2024-01-03", exchange="XNYS")
     ticker_only = TickerPartitionContext(ticker="AAPL", exchange="XNYS")
     ticker = TickerDatePartitionContext(ticker="AAPL", exchange="XNYS", as_of_date="2024-01-03")
+    assert ticker.instrument_id is not None
     portfolio = PortfolioDatePartitionContext(portfolio_id="core", as_of_date="2024-01-03")
     strategy = StrategyDatePartitionContext(strategy_id="mean-reversion", as_of_date="2024-01-03")
     report = ReportDatePartitionContext(report_id="risk-2024-01-03", report_type="risk", as_of_date="2024-01-03")

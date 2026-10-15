@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
+from typing import cast
 
 from ccflow import ModelRegistry
 from ccflow_etl import BaseCalendar
@@ -129,7 +130,7 @@ class FinanceDatesCalendar(BaseCalendar):
     code: str
 
     @classmethod
-    def __class_getitem__(cls, code: str):
+    def __class_getitem__(cls, code: str):  # ty: ignore[invalid-method-override]
         return cls(code=_normalize_code(str(code)))
 
     def calendar(self):
@@ -255,7 +256,7 @@ class ExchangeCalendarRegistry(ModelRegistry):
             return ExchangeSessionStartCalendar(code=code)
         if kind == "session_ends":
             return ExchangeSessionEndCalendar(code=code)
-        return ExchangeSessionIntervalCalendar(code=code, minutes=minutes)
+        return ExchangeSessionIntervalCalendar(code=code, minutes=cast(int, minutes))
 
     def __getitem__(self, item) -> BaseCalendar:
         code, variant = _split_registry_item(item)

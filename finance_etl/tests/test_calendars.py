@@ -4,7 +4,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, ModelRegistry, ResultType
+from ccflow import CallableModel, DateContext, Flow, GenericResult, ModelRegistry
 from ccflow.utils.hydra import cfg_run, load_config as base_load_config
 from finance_dates import COUNTRY_CODES, COUNTRY_CODES3, EXCHANGE_CODES
 from hydra import compose, initialize_config_dir
@@ -25,11 +25,11 @@ from finance_etl import (
 
 class EchoFinanceDateModel(CallableModel):
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[DateContext]:
         return DateContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     @Flow.call

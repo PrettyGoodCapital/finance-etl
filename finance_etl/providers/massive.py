@@ -4,14 +4,15 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList, ResultType
+from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList
 from ccflow_etl import (
     APITokenCredentials,
     ArtifactWriteContext,
     ArtifactWriteModel,
     BackfillContext,
+    CacheFormatName,
     ETLArtifact,
     PayloadCodec,
 )
@@ -291,7 +292,7 @@ class TickersContext(MassiveRequestContext):
 
 class TickerUniversePlanContext(MassiveRequestContext):
     session_dates: list[date]
-    market: str = "stocks"
+    market: MassiveTickerMarket = "stocks"
     active: bool = True
     limit: int = 1000
 
@@ -352,7 +353,7 @@ class MassiveHTTPModel(HTTPModel):
         context_credentials = context.credentials.api_key() if context.credentials else None
         return context.api_key or context_credentials or self.api_key or self.credentials.api_key() or os.environ.get(self.api_key_env)
 
-    def build_request(self, context: MassiveRequestContext | None = None) -> HTTPRequest:
+    def build_request(self, context: MassiveRequestContext | None = None) -> HTTPRequest:  # ty: ignore[invalid-method-override]
         context = context or MassiveRequestContext()
         api_key = self._api_key(context)
         if api_key:
@@ -494,7 +495,7 @@ class TickersModel(MassiveHTTPModel):
     paginate: bool = True
     max_pages: int = 1000
 
-    def build_request(self, context: TickersContext | None = None) -> HTTPRequest:
+    def build_request(self, context: TickersContext | None = None) -> HTTPRequest:  # ty: ignore[invalid-method-override]
         context = context or TickersContext()
         query = {
             **context.query,
@@ -526,10 +527,10 @@ class MassiveDatedReferenceModel(MassiveHTTPModel):
     max_pages: int = 1000
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[MassiveDatedReferenceContext]:
         return MassiveDatedReferenceContext
 
-    def build_request(self, context: MassiveDatedReferenceContext) -> HTTPRequest:
+    def build_request(self, context: MassiveDatedReferenceContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
         query = {**context.query, self.date_field: _date_value(context.date), "limit": self.limit}
         if self.sort is not None:
             query["sort"] = self.sort
@@ -555,11 +556,11 @@ class MassiveDatedSymbolUniverseModel(CallableModel):
     source: str = "massive-stocks-rest-tickers"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[MassiveAllTickersContext]:
         return MassiveAllTickersContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     def _tickers_context(self, context: MassiveAllTickersContext) -> TickersContext:
@@ -662,11 +663,11 @@ class MassiveAllTickersModel(CallableModel):
     provider_rate_limit: dict[str, Any] = Field(default_factory=lambda: {"source": "provider_headers"})
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[MassiveAllTickersContext]:
         return MassiveAllTickersContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     def _date_value(self, context: MassiveAllTickersContext) -> str:
@@ -915,10 +916,10 @@ class DailyAggregateModel(MassiveHTTPModel):
     query: dict = Field(default_factory=lambda: {"sort": "asc", "limit": 50000})
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[DailyAggregateContext]:
         return DailyAggregateContext
 
-    def build_request(self, context: DailyAggregateContext) -> HTTPRequest:
+    def build_request(self, context: DailyAggregateContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
         context = context.model_copy(update={"query": {**context.query, "adjusted": context.adjusted}})
         return super().build_request(context)
 
@@ -926,17 +927,17 @@ class DailyAggregateModel(MassiveHTTPModel):
 class _MassiveRESTExtractModel(CallableModel):
     output: Any | None = None
     explain: bool = False
-    return_type: str = "json"
+    return_type: CacheFormatName = "json"
     output_key_prefix: str
     overwrite_output: bool = False
     dataset_name: str
     provider_name: str = "massive"
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
-    def _request_model(self) -> CallableModel:
+    def _request_model(self) -> MassiveHTTPModel:
         raise NotImplementedError
 
     def output_key(self, context: ContextType) -> str:
@@ -1025,7 +1026,7 @@ class _MassiveRESTExtractModel(CallableModel):
             "required_env": ["MASSIVE_API_KEY"],
             "will_call_network": False,
             "will_publish_output": False,
-            "request": safe_request_dump(self._request_model().build_request(context)),
+            "request": safe_request_dump(self._request_model().build_request(cast(MassiveRequestContext, context))),
             "dataset_metadata": self.dataset_metadata(),
             "base_models": self._base_models(),
         }
@@ -1084,7 +1085,7 @@ class MassiveDailyAggregateExtractModel(_MassiveRESTExtractModel):
     dataset_name: str = "massive-stocks-rest-daily-aggs"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[DailyAggregateContext]:
         return DailyAggregateContext
 
     def _request_model(self) -> DailyAggregateModel:
@@ -1117,7 +1118,7 @@ class MassiveDatedReferenceExtractModel(_MassiveRESTExtractModel):
     reference_name: str
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[MassiveDatedReferenceContext]:
         return MassiveDatedReferenceContext
 
     def _request_model(self) -> MassiveDatedReferenceModel:
@@ -1155,7 +1156,7 @@ class MassiveReferenceSnapshotExtractModel(_MassiveRESTExtractModel):
     reference_name: str
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[MassiveReferenceSnapshotContext]:
         return MassiveReferenceSnapshotContext
 
     def _request_model(self) -> MassiveHTTPModel:
@@ -1240,7 +1241,7 @@ def _artifact_write(
     output: Any,
     key: str,
     payload: Any,
-    return_type: str,
+    return_type: CacheFormatName,
     dataset_name: str,
     metadata: dict[str, Any],
     overwrite: bool,
@@ -1262,7 +1263,7 @@ def _artifact_write(
     return result.model_dump(mode="json")
 
 
-def _existing_artifact(*, output: Any, key: str, return_type: str, dataset_name: str, metadata: dict[str, Any]) -> dict[str, Any]:
+def _existing_artifact(*, output: Any, key: str, return_type: CacheFormatName, dataset_name: str, metadata: dict[str, Any]) -> dict[str, Any]:
     artifact = ETLArtifact(
         key=key,
         stage="extract",
@@ -1285,10 +1286,10 @@ class TickerOverviewModel(MassiveHTTPModel):
     path: str = "/v3/reference/tickers/{{ ticker }}"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[TickerOverviewContext]:
         return TickerOverviewContext
 
-    def build_request(self, context: TickerOverviewContext) -> HTTPRequest:
+    def build_request(self, context: TickerOverviewContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
         query = {**context.query, "date": _date_value(context.date)}
         return super().build_request(context.model_copy(update={"query": query}))
 
@@ -1297,10 +1298,10 @@ class DailyMarketSummaryModel(MassiveHTTPModel):
     path: str = "/v2/aggs/grouped/locale/us/market/stocks/{{ date }}"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[DailyMarketSummaryContext]:
         return DailyMarketSummaryContext
 
-    def build_request(self, context: DailyMarketSummaryContext) -> HTTPRequest:
+    def build_request(self, context: DailyMarketSummaryContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
         query = {**context.query, "adjusted": context.adjusted, "include_otc": context.include_otc}
         return super().build_request(context.model_copy(update={"query": query}))
 
@@ -1309,10 +1310,10 @@ class DailyTickerSummaryModel(MassiveHTTPModel):
     path: str = "/v1/open-close/{{ ticker }}/{{ date }}"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[DailyTickerSummaryContext]:
         return DailyTickerSummaryContext
 
-    def build_request(self, context: DailyTickerSummaryContext) -> HTTPRequest:
+    def build_request(self, context: DailyTickerSummaryContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
         query = {**context.query, "adjusted": context.adjusted}
         return super().build_request(context.model_copy(update={"query": query}))
 
@@ -1323,7 +1324,7 @@ class MassiveTickerOverviewExtractModel(_MassiveRESTExtractModel):
     dataset_name: str = "massive-stocks-rest-ticker-overview"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[TickerOverviewContext]:
         return TickerOverviewContext
 
     def _request_model(self) -> TickerOverviewModel:
@@ -1382,11 +1383,11 @@ class MassiveTickerOverviewBundleExtractModel(CallableModel):
     media_type: str = "application/gzip"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[MassiveAllTickersContext]:
         return MassiveAllTickersContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     def output_key(self, context: MassiveAllTickersContext) -> str:
@@ -1641,7 +1642,7 @@ class MassiveDailyMarketSummaryExtractModel(_MassiveRESTExtractModel):
     dataset_name: str = "massive-stocks-rest-daily-market-summary"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[DailyMarketSummaryContext]:
         return DailyMarketSummaryContext
 
     def _request_model(self) -> DailyMarketSummaryModel:
@@ -1672,7 +1673,7 @@ class MassiveDailyTickerSummaryExtractModel(_MassiveRESTExtractModel):
     dataset_name: str = "massive-stocks-rest-daily-ticker-summary"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[DailyTickerSummaryContext]:
         return DailyTickerSummaryContext
 
     def _request_model(self) -> DailyTickerSummaryModel:
@@ -1725,7 +1726,7 @@ class MassiveDailyTickerSummaryModel(CallableModel):
     adjusted: bool = True
     explain: bool = False
     transform_version: str = "raw"
-    return_type: str = "json"
+    return_type: CacheFormatName = "json"
     dataset_name: str = "massive-daily-ticker-summary"
     dataset_description: str = "Massive daily aggregate payloads for configured stock tickers."
     schema_name: str = "massive_daily_aggregate_response"
@@ -1749,11 +1750,11 @@ class MassiveDailyTickerSummaryModel(CallableModel):
     )
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[MassiveDailyTickerSummaryContext]:
         return MassiveDailyTickerSummaryContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     def _daily_contexts(self, context: MassiveDailyTickerSummaryContext) -> list[DailyAggregateContext]:
@@ -1855,17 +1856,17 @@ class MassiveAllStocksDailySummaryModel(CallableModel):
     summary_model: MassiveDailyTickerSummaryModel = Field(default_factory=MassiveDailyTickerSummaryModel)
     output: Any | None = None
     explain: bool = False
-    market: str = "stocks"
+    market: MassiveTickerMarket = "stocks"
     active: bool = True
     limit: int = 1000
     max_tickers: int | None = None
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[MassiveDailyTickerSummaryContext]:
         return MassiveDailyTickerSummaryContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     def _tickers_context(self, context: MassiveDailyTickerSummaryContext) -> TickersContext:
@@ -1928,11 +1929,11 @@ class MassiveFlatFileTransferModel(CallableModel):
     overwrite_output: bool = False
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[MassiveFlatFileContext]:
         return MassiveFlatFileContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     def dataset_metadata(self) -> dict[str, Any]:

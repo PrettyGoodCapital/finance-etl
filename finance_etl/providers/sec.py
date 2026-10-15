@@ -4,9 +4,10 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList, ResultType
+from ccflow import CallableModel, DateContext, Flow, GenericResult, GraphDepList
 from ccflow_etl import ArtifactReadContext, ArtifactReadModel, ArtifactWriteContext, ArtifactWriteModel, ETLArtifact, ExecutionPolicy
 from ccflow_http import HTTPModel, HTTPRequest, HTTPRequestContext
+from ccflow_http.base import ResponseFormat
 from pydantic import Field, model_validator
 
 __all__ = (
@@ -57,13 +58,13 @@ class SECDailyIndexModel(SECHTTPModel):
     """EDGAR master daily index for one date; 404 means no index was published that day."""
 
     path: str = "/Archives/edgar/daily-index/{{ year }}/QTR{{ quarter }}/master.{{ ymd }}.idx"
-    response_format: str = "text"
+    response_format: ResponseFormat = "text"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[SECDailyIndexContext]:
         return SECDailyIndexContext
 
-    def build_request(self, context: SECDailyIndexContext) -> HTTPRequest:
+    def build_request(self, context: SECDailyIndexContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
         value = context.date
         values = {"year": f"{value.year:04d}", "quarter": (value.month - 1) // 3 + 1, "ymd": value.strftime("%Y%m%d")}
         return super().build_request(context.model_copy(update={"template_values": {**context.template_values, **values}}))
@@ -109,11 +110,11 @@ class SECDailyIndexExtractModel(CallableModel):
     media_type: str = "text/plain"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[SECDateContext]:
         return SECDateContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     def output_key(self, context: SECDateContext) -> str:
@@ -176,11 +177,11 @@ class SECFilerRefreshBundleModel(CallableModel):
     media_type: str = "application/gzip"
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[SECDateContext]:
         return SECDateContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     def output_key(self, context: SECDateContext) -> str:

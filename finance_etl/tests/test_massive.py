@@ -178,7 +178,7 @@ def test_massive_tickers_model_validates_and_builds_supported_filters(monkeypatc
         "apiKey": "secret",
     }
     with pytest.raises(ValueError):
-        TickersContext(market="bonds")
+        TickersContext(market="bonds")  # ty: ignore[invalid-argument-type]
     with pytest.raises(ValueError):
         TickersContext(limit=1001)
 

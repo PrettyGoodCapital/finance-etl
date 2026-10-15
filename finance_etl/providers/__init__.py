@@ -1,5 +1,11 @@
 # Exports resolve on first access, importing only the submodule that defines them, so using a single
 # provider does not import the others.
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .massive import *
+    from .sec import *
+
 _SUBMODULES = ("massive", "sec")
 _EXPORTS: dict[str, str] | None = None
 

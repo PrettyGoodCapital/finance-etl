@@ -2,7 +2,7 @@ import json
 from datetime import date
 from typing import Any
 
-from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList, ResultType
+from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList
 from ccflow_etl import ArtifactReadContext, ArtifactReadModel
 from pydantic import BaseModel, Field, model_validator
 
@@ -44,11 +44,11 @@ class ExplicitSymbolUniverseModel(CallableModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[SymbolUniverseContext]:
         return SymbolUniverseContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     @Flow.call
@@ -76,11 +76,11 @@ class ArtifactSymbolUniverseModel(CallableModel):
     )
 
     @property
-    def context_type(self) -> type[ContextType]:
+    def context_type(self) -> type[SymbolUniverseContext]:
         return SymbolUniverseContext
 
     @property
-    def result_type(self) -> type[ResultType]:
+    def result_type(self) -> type[GenericResult]:
         return GenericResult
 
     def artifact_key(self, context: DateContext) -> str:
@@ -118,6 +118,7 @@ class ArtifactSymbolUniverseModel(CallableModel):
         return sorted({symbol.strip().upper() for symbol in self._symbols(payload) if symbol.strip()})
 
     def _source_context(self, context: DateContext) -> ContextType:
+        assert self.source_model is not None
         return self.source_model.context_type.model_validate({"date": context.date})
 
     @Flow.deps

@@ -6,9 +6,11 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList
+from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList, ModelRegistry
 from ccflow_etl import (
     APITokenCredentials,
+    ArtifactReadContext,
+    ArtifactReadModel,
     ArtifactWriteContext,
     ArtifactWriteModel,
     BackfillContext,
@@ -127,16 +129,20 @@ __all__ = (
     "MassiveReferenceSnapshotContext",
     "MassiveReferenceSnapshotExtractModel",
     "MassiveRequestContext",
+    "MassiveTickerEventsExtractModel",
     "MassiveTickerOverviewBundleExtractModel",
     "MassiveTickerOverviewExtractModel",
     "StockDataPlanContext",
     "StockDataPlanModel",
+    "TickerEventsContext",
+    "TickerEventsModel",
     "TickerOverviewContext",
     "TickerOverviewModel",
     "TickerUniversePlanContext",
     "TickerUniversePlanModel",
     "TickersContext",
     "TickersModel",
+    "diff_ticker_snapshots",
 )
 
 MassiveStockFlatFileDataset = Literal["day-aggs", "minute-aggs", "trades", "quotes"]
@@ -521,7 +527,7 @@ class TickersModel(MassiveHTTPModel):
 
 class MassiveDatedReferenceModel(MassiveHTTPModel):
     date_field: str
-    limit: int = Field(default=5000, ge=1, le=5000)
+    limit: int | None = Field(default=5000, ge=1, le=5000)
     sort: str | None = None
     paginate: bool = True
     max_pages: int = 1000
@@ -1632,6 +1638,228 @@ class MassiveTickerOverviewBundleExtractModel(CallableModel):
                 "not_found_count": counts["not_found"],
                 "universe": universe,
                 "output_writes": output_writes,
+            }
+        )
+
+
+class TickerEventsContext(MassiveRequestContext):
+    identifier: str = Field(description="Ticker, CUSIP, or composite FIGI.")
+
+
+class TickerEventsModel(MassiveHTTPModel):
+    """Ticker change history for one ticker, CUSIP, or composite FIGI; 404 means no events are known."""
+
+    path: str = "/vX/reference/tickers/{{ identifier }}/events"
+    accepted_status_codes: list[int] = Field(default_factory=lambda: [404])
+
+    @property
+    def context_type(self) -> type[TickerEventsContext]:
+        return TickerEventsContext
+
+
+def _index_snapshot(records: list[Any]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    by_figi: dict[str, list[dict[str, Any]]] = {}
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict) or not record.get("ticker"):
+            continue
+        if record.get("composite_figi"):
+            by_figi.setdefault(record["composite_figi"], []).append(record)
+        else:
+            by_ticker[record["ticker"]] = record
+    return by_figi, by_ticker
+
+
+def _change_record(change: str, composite_figi: str | None, previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> dict[str, Any]:
+    reference = (current or previous)[0]
+    return {
+        "change": change,
+        "composite_figi": composite_figi,
+        "tickers": sorted(record["ticker"] for record in current),
+        "previous_tickers": sorted(record["ticker"] for record in previous),
+        "name": reference.get("name"),
+        "type": reference.get("type"),
+        "primary_exchange": reference.get("primary_exchange"),
+        "cik": reference.get("cik"),
+    }
+
+
+def diff_ticker_snapshots(previous: list[Any], current: list[Any]) -> list[dict[str, Any]]:
+    """Diff two all-tickers snapshots on composite FIGI into added, removed, and ticker_changed records.
+
+    Records without a composite FIGI are diffed by ticker, so they can only be added or removed.
+    """
+    previous_figis, previous_tickers = _index_snapshot(previous)
+    current_figis, current_tickers = _index_snapshot(current)
+    changes = []
+    for figi in sorted(previous_figis.keys() | current_figis.keys()):
+        before, after = previous_figis.get(figi, []), current_figis.get(figi, [])
+        if {record["ticker"] for record in before} == {record["ticker"] for record in after}:
+            continue
+        change = "added" if not before else "removed" if not after else "ticker_changed"
+        changes.append(_change_record(change, figi, before, after))
+    for ticker in sorted(previous_tickers.keys() ^ current_tickers.keys()):
+        if ticker in current_tickers:
+            changes.append(_change_record("added", None, [], [current_tickers[ticker]]))
+        else:
+            changes.append(_change_record("removed", None, [previous_tickers[ticker]], []))
+    return changes
+
+
+class MassiveTickerEventsExtractModel(CallableModel):
+    """Capture ticker events for securities that changed between consecutive all-tickers snapshots.
+
+    A security is added or removed when its composite FIGI appears in or disappears from the active snapshot, and has
+    a ticker change when its FIGI is listed under different tickers. Ticker events are requested only for those FIGIs,
+    and one bundle per date holds the diff records with their events. Run over a range, this also fills history,
+    because each date's events are requested for the securities that changed on that date.
+    """
+
+    snapshot_store: Any | None = Field(default=None, description="Store holding the snapshots; defaults to output.")
+    snapshot_key_template: str = "massive/stocks/rest/all-tickers/{date}.json"
+    snapshot_model: CallableModel | None = Field(
+        default=None,
+        description="Model that produces the snapshot for a date. It is declared as a dependency for the date and the previous session.",
+    )
+    calendar: Any = "/calendars/exchange/NYSE"
+    events_model: TickerEventsModel = Field(default_factory=TickerEventsModel)
+    output: Any | None = None
+    output_key_prefix: str = "massive/stocks/rest/ticker-events"
+    dataset_name: str = "massive-stocks-rest-ticker-events"
+    max_concurrency: int = Field(default=4, ge=1)
+    explain: bool = False
+    overwrite_output: bool = False
+    media_type: str = "application/gzip"
+
+    @property
+    def context_type(self) -> type[MassiveAllTickersContext]:
+        return MassiveAllTickersContext
+
+    @property
+    def result_type(self) -> type[GenericResult]:
+        return GenericResult
+
+    def output_key(self, context: MassiveAllTickersContext) -> str:
+        return f"{self.output_key_prefix.strip('/')}/jsonl/{_date_value(context.date)}.jsonl.gz"
+
+    def snapshot_key(self, value: date) -> str:
+        return self.snapshot_key_template.format(date=value.isoformat())
+
+    def previous_session(self, value: date) -> date | None:
+        calendar = ModelRegistry.root()[self.calendar] if isinstance(self.calendar, str) else self.calendar
+        start, end = value - timedelta(days=14), value - timedelta(days=1)
+        if hasattr(calendar, "business_days"):
+            sessions = list(calendar.business_days(start, end))
+        else:
+            sessions = [step.date() if isinstance(step, datetime) else step for step in calendar.steps(start, end)]
+        return sessions[-1] if sessions else None
+
+    def _snapshot_store(self) -> Any:
+        return self.snapshot_store if self.snapshot_store is not None else self.output
+
+    def _will_fetch(self, context: MassiveAllTickersContext) -> bool:
+        if self.explain or self.output is None:
+            return False
+        return self.overwrite_output or not (hasattr(self.output, "exists") and self.output.exists(self.output_key(context)))
+
+    def _snapshot_contexts(self, context: MassiveAllTickersContext) -> list[ContextType]:
+        assert self.snapshot_model is not None
+        dates = [value for value in (self.previous_session(context.date), context.date) if value is not None]
+        return [self.snapshot_model.context_type.model_validate({"date": value}) for value in dates]
+
+    @Flow.deps
+    def __deps__(self, context: MassiveAllTickersContext) -> GraphDepList:
+        if self.snapshot_model is None or not self._will_fetch(context):
+            return []
+        return [(self.snapshot_model, self._snapshot_contexts(context))]
+
+    def _snapshot(self, value: date) -> list[Any] | None:
+        store, key = self._snapshot_store(), self.snapshot_key(value)
+        if hasattr(store, "exists") and not store.exists(key):
+            return None
+        payload = json.loads(ArtifactReadModel(store=store)(ArtifactReadContext(key=key)).payload)
+        records = payload.get("results", []) if isinstance(payload, dict) else payload
+        return records if isinstance(records, list) else []
+
+    def _events(self, context: MassiveAllTickersContext, figi: str) -> dict[str, Any]:
+        result = self.events_model(TickerEventsContext(identifier=figi, api_key=context.api_key, credentials=context.credentials))
+        if result.status_code == 404:
+            return {"events_status": "not_found", "events_status_code": 404, "events": []}
+        results = result.value.get("results", {}) if isinstance(result.value, dict) else {}
+        return {
+            "events_status": "ok",
+            "events_status_code": result.status_code,
+            "events_name": results.get("name"),
+            "events": results.get("events", []),
+        }
+
+    def _write_record(self, key: str, status: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        return ETLArtifact(
+            key=key,
+            stage="extract",
+            status=status,
+            dataset=self.dataset_name,
+            uri=_artifact_uri(self.output, key),
+            media_type=self.media_type,
+            metadata=metadata,
+        ).model_dump(mode="json")
+
+    @Flow.call
+    def __call__(self, context: MassiveAllTickersContext) -> GenericResult:
+        key = self.output_key(context)
+        previous = self.previous_session(context.date)
+        plan = {
+            "dataset": self.dataset_name,
+            "date": _date_value(context.date),
+            "previous_date": _date_value(previous) if previous else None,
+            "output_key": key,
+            "output_uri": _artifact_uri(self.output, key),
+            "snapshot_keys": [self.snapshot_key(value) for value in (previous, context.date) if value is not None],
+        }
+        if self.explain:
+            return GenericResult(value={**plan, "status": "planned", "will_call_network": False})
+        if self.output is None:
+            raise ValueError("Massive ticker events extract requires output.")
+        metadata = {"date": plan["date"], "previous_date": plan["previous_date"], "provider": "massive", "dataset": self.dataset_name}
+        if not self._will_fetch(context):
+            return GenericResult(value={**plan, "status": "exists", "output_writes": [self._write_record(key, "exists", metadata)]})
+        if self.snapshot_model is not None:
+            for snapshot_context in self._snapshot_contexts(context):
+                self.snapshot_model(snapshot_context)
+        current = self._snapshot(context.date)
+        before = self._snapshot(previous) if previous is not None else None
+        if current is None or before is None:
+            return GenericResult(value={**plan, "status": "no_previous_snapshot" if current is not None else "no_snapshot", "output_writes": []})
+        changes = diff_ticker_snapshots(before, current)
+        figis = [change["composite_figi"] for change in changes if change["composite_figi"]]
+        with ThreadPoolExecutor(max_workers=self.max_concurrency) as executor:
+            events = dict(zip(figis, executor.map(lambda figi: self._events(context, figi), figis)))
+        records = [
+            {"date": plan["date"], "previous_date": plan["previous_date"], **change, **events.get(change["composite_figi"], {})} for change in changes
+        ]
+        payload = gzip.compress(b"".join(json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n" for record in records))
+        counts = {change: sum(record["change"] == change for record in records) for change in ("added", "removed", "ticker_changed")}
+        metadata = {**metadata, "record_count": len(records), **{f"{change}_count": count for change, count in counts.items()}}
+        write = ArtifactWriteModel(store=self.output)(
+            ArtifactWriteContext(
+                key=key,
+                payload=payload,
+                media_type=self.media_type,
+                dataset=self.dataset_name,
+                stage="extract",
+                overwrite=self.overwrite_output,
+                metadata=metadata,
+            )
+        )
+        return GenericResult(
+            value={
+                **plan,
+                "status": write.status,
+                "record_count": len(records),
+                **{f"{change}_count": count for change, count in counts.items()},
+                "requested_count": len(figis),
+                "not_found_count": sum(value["events_status"] == "not_found" for value in events.values()),
+                "output_writes": [write.model_dump(mode="json")],
             }
         )
 

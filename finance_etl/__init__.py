@@ -5,13 +5,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .calendars import *
     from .providers.massive import *
+    from .providers.openfigi import *
     from .providers.sec import *
     from .symbols import *
     from .types import *
 
 # Exports resolve on first access, importing only the submodule that defines them, so locating
 # finance_etl.config for Hydra and using a single model do not import every provider and dependency.
-_SUBMODULES = ("calendars", "providers.massive", "providers.sec", "symbols", "types")
+_SUBMODULES = ("calendars", "providers.massive", "providers.openfigi", "providers.sec", "symbols", "types")
 _EXPORTS: dict[str, str] | None = None
 
 

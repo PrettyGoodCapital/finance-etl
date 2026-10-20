@@ -31,7 +31,7 @@ classifiers = [
 dependencies = [
     "ccflow>=0.6.10",
     "ccflow-etl>=0.2.0",
-    "ccflow-http",
+    "ccflow-http>=0.4.0",
     "finance-dates",
 ]
 

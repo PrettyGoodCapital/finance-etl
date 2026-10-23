@@ -2145,13 +2145,33 @@ class MassiveAllStocksDailySummaryModel(CallableModel):
         )
 
 
+_UNAVAILABLE_S3_CODES = frozenset({"403", "404", "AccessDenied", "Forbidden", "NoSuchKey", "NotFound"})
+
+
+def _unavailable_s3_code(exc: Exception) -> str | None:
+    """The S3 error code when a source object cannot be read (not entitled, outside the plan window, or unpublished)."""
+    response = getattr(exc, "response", None) or {}
+    code = str(response.get("Error", {}).get("Code", ""))
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    if code in _UNAVAILABLE_S3_CODES or status in (403, 404):
+        return code or str(status)
+    return None
+
+
 class MassiveFlatFileTransferModel(CallableModel):
+    """Copy one day's Massive flat file to the output store through a local file, which is removed after publishing."""
+
     dataset: MassiveStockFlatFileDataset = "day-aggs"
     source_client: Any | None = None
     source_bucket: str = "flatfiles"
     output: Any | None = None
     output_key_prefix: str = "massive/stocks/flat-files"
     local_dir: Path = Path("/tmp/ccflow-massive-flat-files")
+    keep_local_file: bool = False
+    fail_on_unavailable: bool = Field(
+        default=True,
+        description="Raise when the source file cannot be read (403 or 404). History runs set this false to record the date as unavailable and continue.",
+    )
     media_type: str = "application/gzip"
     explain: bool = False
     overwrite_output: bool = False
@@ -2295,8 +2315,18 @@ class MassiveFlatFileTransferModel(CallableModel):
             output_writes = [self._output_write_record(payload["output_key"], "exists", {"source_key": payload["source_key"]})]
             return GenericResult(value={**payload, "status": "exists", "output_writes": output_writes})
         local_path = self.local_path(context)
-        self._download(payload["source_key"], local_path)
-        output_writes = self._publish_output(payload["output_key"], local_path, context)
+        try:
+            try:
+                self._download(payload["source_key"], local_path)
+            except Exception as exc:
+                code = _unavailable_s3_code(exc)
+                if code is None or self.fail_on_unavailable:
+                    raise
+                return GenericResult(value={**payload, "status": "unavailable", "will_download": True, "error_code": code})
+            output_writes = self._publish_output(payload["output_key"], local_path, context)
+        finally:
+            if not self.keep_local_file:
+                local_path.unlink(missing_ok=True)
         status = output_writes[0]["status"] if output_writes else "written"
         return GenericResult(value={**payload, "status": status, "will_download": True, "will_publish_output": True, "output_writes": output_writes})
 

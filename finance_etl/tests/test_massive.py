@@ -913,6 +913,35 @@ def test_massive_flat_file_transfer_downloads_and_writes_output(tmp_path):
     assert output.writes[0]["key"] == "massive/stocks/flat-files/quotes/2025/11/2025-11-05.csv.gz"
     assert output.writes[0]["body"] == b"csv-gzip-bytes"
     assert output.writes[0]["media_type"] == "application/gzip"
+    assert not model.local_path(model.context_type.model_validate(["2025-11-05"])).exists()
+
+
+def test_massive_flat_file_transfer_records_unavailable_dates_when_asked(tmp_path):
+    import pytest
+
+    class Forbidden(Exception):
+        def __init__(self):
+            super().__init__("Forbidden")
+            self.response = {"Error": {"Code": "403"}, "ResponseMetadata": {"HTTPStatusCode": 403}}
+
+    class FakeSourceClient:
+        def get_object(self, Bucket, Key):
+            raise Forbidden()
+
+    class FakeOutput:
+        def exists(self, key):
+            return False
+
+        def write_file(self, key, path, media_type=None, metadata=None):
+            raise AssertionError("unavailable dates must not be written")
+
+    model = MassiveFlatFileTransferModel(dataset="trades", source_client=FakeSourceClient(), output=FakeOutput(), local_dir=tmp_path)
+
+    with pytest.raises(Forbidden):
+        model(["2019-11-05"])
+    payload = model.model_copy(update={"fail_on_unavailable": False})(["2019-11-05"]).value
+    assert (payload["status"], payload["error_code"]) == ("unavailable", "403")
+    assert not list(tmp_path.rglob("*.csv.gz"))
 
 
 def test_massive_all_tickers_explain_plans_single_json_output(monkeypatch):

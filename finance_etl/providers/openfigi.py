@@ -11,6 +11,7 @@ from ccflow_etl import (
     ArtifactReadModel,
     ArtifactWriteContext,
     ArtifactWriteModel,
+    DatasetDefinition,
     ETLArtifact,
     ExecutionPolicy,
 )
@@ -20,8 +21,10 @@ from pydantic import Field
 
 __all__ = (
     "OpenFIGICredentials",
+    "OpenFIGICusipCaptureModel",
     "OpenFIGIMappingCaptureModel",
     "OpenFIGIMappingModel",
+    "isin_from_cusip",
     "openfigi_ticker_queries",
 )
 
@@ -228,4 +231,131 @@ class OpenFIGIMappingCaptureModel(CallableModel):
                 **{f"{status}_count": count for status, count in counts.items()},
                 "output_writes": [write.model_dump(mode="json")],
             }
+        )
+
+
+# Country prefixes tried for CINS numbers (CUSIPs starting with a letter, for issuers outside the US).
+_CINS_ISIN_PREFIXES = ("KY", "VG", "BM", "US", "MH", "CA", "GB")
+
+
+def isin_from_cusip(cusip: str, country: str = "US") -> str:
+    """ISIN for a CUSIP: country prefix, the CUSIP, and the Luhn check digit over the alphanumeric expansion."""
+    body = country + cusip
+    digits = "".join(str(int(character, 36)) for character in body)
+    total = 0
+    for position, digit in enumerate(reversed(digits)):
+        value = int(digit) * (2 if position % 2 == 0 else 1)
+        total += value // 10 + value % 10
+    return body + str((10 - total % 10) % 10)
+
+
+class OpenFIGICusipCaptureModel(CallableModel):
+    """Capture OpenFIGI matches by CUSIP for a session's listings that have no composite FIGI.
+
+    CUSIPs come from a dated symbol master (such as the WRDS NYSE TAQ master) joined on symbol. Each CUSIP is mapped
+    on OpenFIGI, and unmatched ones are retried as ISINs. Matches carry the composite FIGI, or the exchange-level FIGI
+    for securities that have none (such as exchange-listed preferreds). When the session's master is not available
+    yet, nothing is written, so a later run fills the session once the master arrives.
+    """
+
+    mapping_model: OpenFIGIMappingModel = Field(default_factory=OpenFIGIMappingModel)
+    snapshot: DatasetDefinition = Field(description="Listings snapshot partitions: JSON with records under records_key.")
+    cusips: DatasetDefinition = Field(description="Symbol master partitions with symbol and CUSIP columns.")
+    output: DatasetDefinition
+    records_key: str = "results"
+    ticker_field: str = "ticker"
+    figi_field: str = "composite_figi"
+    symbol_column: str = "CTA_SYMBOL"
+    cusip_column: str = "CUSIP"
+    explain: bool = False
+    overwrite_output: bool = False
+
+    @property
+    def context_type(self) -> type[DateContext]:
+        return DateContext
+
+    @property
+    def result_type(self) -> type[GenericResult]:
+        return GenericResult
+
+    def _map(self, jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        responses = []
+        for start in range(0, len(jobs), _MAX_JOBS_PER_REQUEST):
+            result = self.mapping_model(HTTPRequestContext(json_body=jobs[start : start + _MAX_JOBS_PER_REQUEST]))
+            responses.extend(result.value if isinstance(result.value, list) else [])
+        return responses
+
+    @staticmethod
+    def _match(data: list[dict[str, Any]]) -> dict[str, Any]:
+        best = min(data, key=lambda item: not item.get("compositeFIGI"))
+        return {
+            **best,
+            "compositeFIGI": best.get("compositeFIGI") or best.get("figi"),
+            "figiKind": "composite" if best.get("compositeFIGI") else "exchange",
+        }
+
+    def _lookup(self, cusips: list[str]) -> dict[str, dict[str, Any]]:
+        found: dict[str, dict[str, Any]] = {}
+        for cusip, response in zip(cusips, self._map([{"idType": "ID_CUSIP", "idValue": cusip} for cusip in cusips]), strict=False):
+            if response.get("data"):
+                found[cusip] = {"query": cusip, "id_type": "ID_CUSIP", "match": self._match(response["data"])}
+        retry = [
+            (cusip, isin_from_cusip(cusip, country))
+            for cusip in cusips
+            if cusip not in found
+            for country in (("US",) if cusip[0].isdigit() else _CINS_ISIN_PREFIXES)
+        ]
+        for (cusip, isin), response in zip(retry, self._map([{"idType": "ID_ISIN", "idValue": isin} for _, isin in retry]), strict=False):
+            if response.get("data") and cusip not in found:
+                found[cusip] = {"query": isin, "id_type": "ID_ISIN", "match": self._match(response["data"])}
+        return found
+
+    @Flow.call
+    def __call__(self, context: DateContext) -> GenericResult:
+        import polars as pl
+
+        plan = {**self.output.plan(context.date), "snapshot_key": self.snapshot.key(context.date), "cusips_key": self.cusips.key(context.date)}
+        if self.explain:
+            return GenericResult(value={**plan, "status": "planned", "will_call_network": False})
+        if not self.overwrite_output and self.output.exists(context.date):
+            return GenericResult(value={**plan, "status": "exists"})
+        if not self.cusips.exists(context.date):
+            return GenericResult(value={**plan, "status": "waiting"})
+        if not self.snapshot.exists(context.date):
+            return GenericResult(value={**plan, "status": "no_snapshot"})
+        payload = json.loads(self.snapshot.read_bytes(context.date))
+        records = payload.get(self.records_key, []) if isinstance(payload, dict) else payload
+        missing = [record for record in records if isinstance(record, dict) and record.get(self.ticker_field) and not record.get(self.figi_field)]
+        master = (
+            self.cusips.read_frame(context.date)
+            .select(pl.col(self.symbol_column).alias("ticker"), pl.col(self.cusip_column).alias("cusip"))
+            .drop_nulls()
+        )
+        cusip_by_ticker = dict(zip(master["ticker"].to_list(), master["cusip"].to_list(), strict=True))
+        found = self._lookup(sorted({cusip_by_ticker[r[self.ticker_field]] for r in missing if r[self.ticker_field] in cusip_by_ticker}))
+        captured_at = datetime.now(UTC).isoformat()
+        rows = []
+        for record in missing:
+            cusip = cusip_by_ticker.get(record[self.ticker_field])
+            hit = found.get(cusip) if cusip else None
+            status = "matched" if hit else ("no_match" if cusip else "no_cusip")
+            rows.append(
+                {
+                    "date": context.date.isoformat(),
+                    "captured_at": captured_at,
+                    "record": record,
+                    "cusip": cusip,
+                    "status": status,
+                    "query": hit["query"] if hit else None,
+                    "id_type": hit["id_type"] if hit else None,
+                    "matches": [hit["match"]] if hit else [],
+                }
+            )
+        counts = {status: sum(row["status"] == status for row in rows) for status in ("matched", "no_match", "no_cusip")}
+        body = gzip.compress(b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows))
+        writes = self.output.write_bytes(
+            context.date, body, {"record_count": len(rows), **{f"{k}_count": v for k, v in counts.items()}}, overwrite=self.overwrite_output
+        )
+        return GenericResult(
+            value={**plan, "status": "written", "record_count": len(rows), **{f"{k}_count": v for k, v in counts.items()}, "output_writes": writes}
         )

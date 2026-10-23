@@ -119,3 +119,62 @@ def test_openfigi_capture_explain_and_existing_output_skip_network():
 
     existing = MemoryStore({"openfigi/mapping/jsonl/2025-01-06.jsonl.gz": b""})
     assert OpenFIGIMappingCaptureModel(output=existing, mapping_model=FailingMappingModel())("2025-01-06").value["status"] == "exists"
+
+
+def test_isin_from_cusip_computes_check_digits():
+    from finance_etl.providers.openfigi import isin_from_cusip
+
+    assert isin_from_cusip("037833100") == "US0378331005"
+    assert isin_from_cusip("G1169T138", "KY") == "KYG1169T1388"
+
+
+def test_openfigi_cusip_capture_maps_cusips_then_isins_and_waits_for_the_master(tmp_path):
+    from datetime import date
+
+    import polars as pl
+    from ccflow_etl import DatasetDefinition, LocalFileOutput
+
+    from finance_etl.providers.openfigi import OpenFIGICusipCaptureModel
+
+    day = date(2025, 1, 6)
+    store = LocalFileOutput(path=tmp_path)
+    snapshot = DatasetDefinition(name="snapshot", key_template="raw/tickers/{date}.json", store=store, format="json")
+    master = DatasetDefinition(name="master", key_template="raw/master/{ymd}.parquet", store=store)
+    output = DatasetDefinition(name="cusip-fills", key_template="raw/cusip/{date}.jsonl.gz", store=store, format="jsonl.gz")
+    snapshot.write_bytes(day, json.dumps({"results": RECORDS}).encode())
+    requests = []
+
+    class FakeMappingModel(OpenFIGIMappingModel):
+        @Flow.call
+        def __call__(self, context):
+            requests.append([(job["idType"], job["idValue"]) for job in context.json_body])
+            known = {
+                "038923876": {"figi": "BBG00PREF001", "name": "ARBOR REALTY TRUST", "securityType2": "Preferred Stock"},
+                "KYG0R38M1018": {
+                    "compositeFIGI": "BBG01AACI001",
+                    "figi": "BBG01AACI001",
+                    "name": "ARMADA ACQUISITION CORP III",
+                    "securityType2": "Common Stock",
+                },
+            }
+            return HTTPResult(
+                value=[
+                    {"data": [known[job["idValue"]]]} if job["idValue"] in known else {"warning": "No identifier found."} for job in context.json_body
+                ],
+                status_code=200,
+            )
+
+    model = OpenFIGICusipCaptureModel(mapping_model=FakeMappingModel(), snapshot=snapshot, cusips=master, output=output)
+    assert model(day).value["status"] == "waiting"
+    assert requests == []
+
+    master.write_frame(day, pl.DataFrame({"CTA_SYMBOL": ["ABRpD", "AACI", "AAPL"], "CUSIP": ["038923876", "G0R38M101", "037833100"]}))
+    result = model(day).value
+    rows = {row["record"]["ticker"]: row for row in map(json.loads, gzip.decompress(output.read_bytes(day)).splitlines())}
+
+    assert (result["status"], result["matched_count"], result["no_cusip_count"]) == ("written", 2, 2)
+    assert rows["ABRpD"]["matches"][0]["compositeFIGI"] == "BBG00PREF001" and rows["ABRpD"]["matches"][0]["figiKind"] == "exchange"
+    assert (rows["AACI"]["id_type"], rows["AACI"]["query"]) == ("ID_ISIN", "KYG0R38M1018")
+    assert rows["AACI"]["matches"][0]["figiKind"] == "composite"
+    assert rows["ZZZZ"]["status"] == "no_cusip" and "AAPL" not in rows
+    assert model(day).value["status"] == "exists"

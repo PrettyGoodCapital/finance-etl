@@ -1195,6 +1195,41 @@ def test_massive_dated_reference_extract_writes_one_market_wide_daily_artifact(m
     assert json.loads(output.writes[0]["payload"])["results"] == [{"execution_date": "2025-01-02", "ticker": "AAPL"}]
 
 
+def test_massive_dated_reference_extract_writes_through_a_dataset_and_skips_dates_before_it(monkeypatch):
+    from ccflow_etl import DatasetDefinition
+
+    calls = []
+
+    class FakeReferenceModel(MassiveDatedReferenceModel):
+        @Flow.call
+        def __call__(self, context):
+            calls.append(context.date)
+            return HTTPResult(value={"status": "OK", "results": []}, status_code=200, attempts=1, pages=1)
+
+    monkeypatch.setenv("MASSIVE_API_KEY", "secret")
+    output = RecordingArtifactOutput()
+    dataset = DatasetDefinition(
+        name="massive-stocks-rest-short-volume",
+        key_template="massive/stocks/rest/short-volume/json/{year}/{month}/{date}.json",
+        store=output,
+        format="json",
+        first_date=date(2024, 2, 6),
+    )
+    model = MassiveDatedReferenceExtractModel(
+        reference_model=FakeReferenceModel(path="/stocks/v1/short-volume", date_field="date"), reference_name="short-volume", dataset=dataset
+    )
+
+    early = model(["2024-02-05"]).value
+    payload = model(["2025-01-02"]).value
+
+    assert (early["status"], early["output_writes"]) == ("before_first_date", [])
+    assert calls == [date(2025, 1, 2)]
+    assert (payload["status"], payload["dataset"]) == ("written", "massive-stocks-rest-short-volume")
+    assert output.writes[0]["key"] == "massive/stocks/rest/short-volume/json/2025/01/2025-01-02.json"
+    with pytest.raises(ValueError, match="needs a dataset"):
+        MassiveDatedReferenceExtractModel(reference_model=FakeReferenceModel(path="/x", date_field="date"), reference_name="x")
+
+
 @pytest.mark.parametrize(
     ("reference_model", "reference_name"),
     [

@@ -15,6 +15,7 @@ from ccflow_etl import (
     ArtifactWriteModel,
     BackfillContext,
     CacheFormatName,
+    DatasetDefinition,
     ETLArtifact,
     PayloadCodec,
 )
@@ -932,12 +933,41 @@ class DailyAggregateModel(MassiveHTTPModel):
 
 class _MassiveRESTExtractModel(CallableModel):
     output: Any | None = None
+    dataset: DatasetDefinition | None = Field(
+        default=None,
+        description="Date-partitioned dataset to write to. When set, it supplies the store, key, name, and first date in place of output, output_key_prefix, and dataset_name.",
+    )
     explain: bool = False
     return_type: CacheFormatName = "json"
-    output_key_prefix: str
+    output_key_prefix: str = ""
     overwrite_output: bool = False
-    dataset_name: str
+    dataset_name: str = ""
     provider_name: str = "massive"
+
+    @model_validator(mode="after")
+    def _check_destination(self):
+        if self.dataset is None and not (self.output_key_prefix and self.dataset_name):
+            raise ValueError("A Massive extract needs a dataset, or output_key_prefix and dataset_name.")
+        return self
+
+    @property
+    def _store(self) -> Any:
+        if self.dataset is None:
+            return self.output
+        return ModelRegistry.root()[self.dataset.store] if isinstance(self.dataset.store, str) else self.dataset.store
+
+    @property
+    def _name(self) -> str:
+        return self.dataset.name if self.dataset is not None else self.dataset_name
+
+    def _partition_date(self, context: ContextType) -> date:
+        return date.fromisoformat(_date_value(context.date))
+
+    def _key(self, context: ContextType) -> str:
+        return self.dataset.key(self._partition_date(context)) if self.dataset is not None else self.output_key(context)
+
+    def _before_first_date(self, context: ContextType) -> bool:
+        return self.dataset is not None and self.dataset.first_date is not None and self._partition_date(context) < self.dataset.first_date
 
     @property
     def result_type(self) -> type[GenericResult]:
@@ -959,7 +989,7 @@ class _MassiveRESTExtractModel(CallableModel):
         raise NotImplementedError
 
     def _output_required_message(self) -> str:
-        return f"{self.dataset_name} extract task requires output."
+        return f"{self._name} extract task requires output."
 
     def _base_models(self) -> dict[str, Any]:
         request_model = self._request_model()
@@ -970,15 +1000,15 @@ class _MassiveRESTExtractModel(CallableModel):
         }
 
     def _planned_write(self, context: ContextType) -> list[dict[str, Any]]:
-        if self.output is None:
+        if self._store is None:
             return []
         return [
             _artifact_write(
-                output=self.output,
-                key=self.output_key(context),
+                output=self._store,
+                key=self._key(context),
                 payload={},
                 return_type=self.return_type,
-                dataset_name=self.dataset_name,
+                dataset_name=self._name,
                 metadata=self._metadata(context),
                 overwrite=self.overwrite_output,
                 dry_run=True,
@@ -988,29 +1018,29 @@ class _MassiveRESTExtractModel(CallableModel):
     def _existing_write(self, context: ContextType) -> list[dict[str, Any]]:
         return [
             _existing_artifact(
-                output=self.output,
-                key=self.output_key(context),
+                output=self._store,
+                key=self._key(context),
                 return_type=self.return_type,
-                dataset_name=self.dataset_name,
+                dataset_name=self._name,
                 metadata=self._metadata(context),
             )
         ]
 
     def _output_exists(self, context: ContextType) -> bool:
-        if self.output is None or self.overwrite_output or not hasattr(self.output, "exists"):
+        if self._store is None or self.overwrite_output or not hasattr(self._store, "exists"):
             return False
-        return self.output.exists(self.output_key(context))
+        return self._store.exists(self._key(context))
 
     def _write_output(self, context: ContextType, payload: Any) -> list[dict[str, Any]]:
-        if self.output is None:
+        if self._store is None:
             raise ValueError(self._output_required_message())
         return [
             _artifact_write(
-                output=self.output,
-                key=self.output_key(context),
+                output=self._store,
+                key=self._key(context),
                 payload=payload,
                 return_type=self.return_type,
-                dataset_name=self.dataset_name,
+                dataset_name=self._name,
                 metadata=self._metadata(context),
                 overwrite=self.overwrite_output,
             )
@@ -1020,14 +1050,14 @@ class _MassiveRESTExtractModel(CallableModel):
         return None
 
     def _plan(self, context: ContextType) -> dict[str, Any]:
-        output_key = self.output_key(context)
+        output_key = self._key(context)
         return {
-            "dataset": self.dataset_name,
+            "dataset": self._name,
             "provider": self.provider_name,
             **self._plan_fields(context),
             "return_type": self.return_type,
             "output_key": output_key,
-            "output_uri": _artifact_uri(self.output, output_key) if self.output is not None else None,
+            "output_uri": _artifact_uri(self._store, output_key) if self._store is not None else None,
             "output_writes": self._planned_write(context),
             "required_env": ["MASSIVE_API_KEY"],
             "will_call_network": False,
@@ -1040,9 +1070,11 @@ class _MassiveRESTExtractModel(CallableModel):
     @Flow.call
     def __call__(self, context: ContextType) -> GenericResult:
         payload = self._plan(context)
+        if self._before_first_date(context):
+            return GenericResult(value={**payload, "status": "before_first_date", "output_writes": []})
         if self.explain:
             return GenericResult(value={**payload, "status": "planned"})
-        if self.output is None:
+        if self._store is None:
             raise ValueError(self._output_required_message())
         if self._output_exists(context):
             return GenericResult(

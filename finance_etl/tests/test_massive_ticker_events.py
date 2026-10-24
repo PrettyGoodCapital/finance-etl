@@ -124,3 +124,31 @@ def test_ticker_events_extract_skips_existing_output_and_missing_previous_snapsh
     assert payload["status"] == "no_previous_snapshot"
     assert payload["output_writes"] == []
     assert model.previous_session(date(2025, 1, 3)) == date(2025, 1, 2)
+
+
+def test_ticker_events_extract_reads_and_writes_through_datasets():
+    from ccflow_etl import DatasetDefinition
+
+    class NoEventsModel(TickerEventsModel):
+        @Flow.call
+        def __call__(self, context):
+            return HTTPResult(value={"results": {"events": []}}, status_code=200)
+
+    snapshots = MemoryStore({key.replace("massive/stocks/rest/all-tickers", "snap"): value for key, value in _snapshots().items()})
+    output = MemoryStore()
+    model = MassiveTickerEventsExtractModel(
+        snapshot=DatasetDefinition(name="snap", key_template="snap/{date}.json", store=snapshots, format="json"),
+        dataset=DatasetDefinition(name="events", key_template="events/{date}.jsonl.gz", store=output, format="jsonl.gz", first_date=date(2025, 1, 6)),
+        calendar=WeekdayCalendar(),
+        events_model=NoEventsModel(),
+    )
+
+    payload = model(["2025-01-06"]).value
+
+    assert (payload["status"], payload["dataset"], payload["snapshot_keys"]) == (
+        "written",
+        "events",
+        ["snap/2025-01-03.json", "snap/2025-01-06.json"],
+    )
+    assert "events/2025-01-06.jsonl.gz" in output.objects
+    assert model(["2025-01-03"]).value["status"] == "before_first_date"

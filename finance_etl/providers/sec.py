@@ -10,6 +10,8 @@ from ccflow_http import HTTPModel, HTTPRequest, HTTPRequestContext
 from ccflow_http.base import ResponseFormat
 from pydantic import Field, model_validator
 
+from finance_etl.providers._dataset_output import DatasetOutputMixin
+
 __all__ = (
     "SECDailyIndexContext",
     "SECDailyIndexExtractModel",
@@ -98,7 +100,7 @@ def _existing_artifact(store: Any, key: str, dataset: str, media_type: str, meta
     ).model_dump(mode="json")
 
 
-class SECDailyIndexExtractModel(CallableModel):
+class SECDailyIndexExtractModel(DatasetOutputMixin, CallableModel):
     """Store the EDGAR master daily index for a date under a dated key."""
 
     index_model: SECDailyIndexModel
@@ -123,31 +125,33 @@ class SECDailyIndexExtractModel(CallableModel):
 
     @Flow.call
     def __call__(self, context: SECDateContext) -> GenericResult:
-        key = self.output_key(context)
-        metadata = {"date": context.date.isoformat(), "provider": "sec", "dataset": self.dataset_name}
-        plan = {"dataset": self.dataset_name, "date": context.date.isoformat(), "output_key": key, "output_uri": _artifact_uri(self.output, key)}
+        key = self._key(context)
+        metadata = {"date": context.date.isoformat(), "provider": "sec", "dataset": self._name}
+        plan = {"dataset": self._name, "date": context.date.isoformat(), "output_key": key, "output_uri": _artifact_uri(self._store, key)}
+        if self._before_first_date(context):
+            return GenericResult(value={**plan, "status": "before_first_date", "output_writes": []})
         if self.explain:
             return GenericResult(value={**plan, "status": "planned", "will_call_network": False})
-        if self.output is None:
+        if self._store is None:
             raise ValueError("SEC daily index extract requires output.")
-        if not self.overwrite_output and hasattr(self.output, "exists") and self.output.exists(key):
+        if not self.overwrite_output and hasattr(self._store, "exists") and self._store.exists(key):
             return GenericResult(
                 value={
                     **plan,
                     "status": "exists",
-                    "output_writes": [_existing_artifact(self.output, key, self.dataset_name, self.media_type, metadata)],
+                    "output_writes": [_existing_artifact(self._store, key, self._name, self.media_type, metadata)],
                 }
             )
         result = self.index_model(SECDailyIndexContext(date=context.date))
         if result.status_code == 404:
             return GenericResult(value={**plan, "status": "not_published", "status_code": 404, "output_writes": []})
         rows = parse_master_index(result.value)
-        write = ArtifactWriteModel(store=self.output)(
+        write = ArtifactWriteModel(store=self._store)(
             ArtifactWriteContext(
                 key=key,
                 payload=result.value.encode(),
                 media_type=self.media_type,
-                dataset=self.dataset_name,
+                dataset=self._name,
                 stage="extract",
                 overwrite=self.overwrite_output,
                 metadata={**metadata, "filing_count": len(rows)},
@@ -156,7 +160,7 @@ class SECDailyIndexExtractModel(CallableModel):
         return GenericResult(value={**plan, "status": write.status, "filing_count": len(rows), "output_writes": [write.model_dump(mode="json")]})
 
 
-class SECFilerRefreshBundleModel(CallableModel):
+class SECFilerRefreshBundleModel(DatasetOutputMixin, CallableModel):
     """Fetch current company facts and submissions for every company that filed financial forms on a date.
 
     Filers come from that date's stored daily index, which is declared as a graph dependency. Records are staged to
@@ -188,9 +192,9 @@ class SECFilerRefreshBundleModel(CallableModel):
         return f"{self.output_key_prefix.strip('/')}/jsonl/{context.date.isoformat()}.jsonl.gz"
 
     def _will_fetch(self, context: SECDateContext) -> bool:
-        if self.explain or self.output is None:
+        if self.explain or self._store is None or self._before_first_date(context):
             return False
-        return self.overwrite_output or not (hasattr(self.output, "exists") and self.output.exists(self.output_key(context)))
+        return self.overwrite_output or not (hasattr(self._store, "exists") and self._store.exists(self._key(context)))
 
     @Flow.deps
     def __deps__(self, context: SECDateContext) -> GraphDepList:
@@ -198,10 +202,10 @@ class SECFilerRefreshBundleModel(CallableModel):
 
     def _filers(self, context: SECDateContext) -> list[dict[str, Any]]:
         self.index_extract(context)
-        key = self.index_extract.output_key(context)
-        if not self.index_extract.output.exists(key):
+        key = self.index_extract._key(context)
+        if not self.index_extract._store.exists(key):
             return []
-        text = ArtifactReadModel(store=self.index_extract.output)(ArtifactReadContext(key=key)).payload.decode()
+        text = ArtifactReadModel(store=self.index_extract._store)(ArtifactReadContext(key=key)).payload.decode()
         wanted = set(self.form_types)
         filers: dict[str, dict[str, Any]] = {}
         for row in parse_master_index(text):
@@ -248,25 +252,27 @@ class SECFilerRefreshBundleModel(CallableModel):
 
     @Flow.call
     def __call__(self, context: SECDateContext) -> GenericResult:
-        key = self.output_key(context)
-        metadata = {"date": context.date.isoformat(), "provider": "sec", "dataset": self.dataset_name, "format": "jsonl", "compression": "gzip"}
+        key = self._key(context)
+        metadata = {"date": context.date.isoformat(), "provider": "sec", "dataset": self._name, "format": "jsonl", "compression": "gzip"}
         plan = {
-            "dataset": self.dataset_name,
+            "dataset": self._name,
             "date": context.date.isoformat(),
             "output_key": key,
-            "output_uri": _artifact_uri(self.output, key),
+            "output_uri": _artifact_uri(self._store, key),
             "form_types": self.form_types,
         }
+        if self._before_first_date(context):
+            return GenericResult(value={**plan, "status": "before_first_date", "output_writes": []})
         if self.explain:
             return GenericResult(value={**plan, "status": "planned", "will_call_network": False})
-        if self.output is None:
+        if self._store is None:
             raise ValueError("SEC filer refresh requires output.")
         if not self._will_fetch(context):
             return GenericResult(
                 value={
                     **plan,
                     "status": "exists",
-                    "output_writes": [_existing_artifact(self.output, key, self.dataset_name, self.media_type, metadata)],
+                    "output_writes": [_existing_artifact(self._store, key, self._name, self.media_type, metadata)],
                 }
             )
 
@@ -285,7 +291,7 @@ class SECFilerRefreshBundleModel(CallableModel):
             for block in iter(lambda: source.read(1 << 20), b""):
                 destination.write(block)
         metadata = {**metadata, "filer_count": len(filers)}
-        response = self.output.write_file(key, compressed, media_type=self.media_type, metadata=metadata)
+        response = self._store.write_file(key, compressed, media_type=self.media_type, metadata=metadata)
         status = str(response.get("status", "written")) if isinstance(response, dict) else "written"
         partial.unlink(missing_ok=True)
         compressed.unlink(missing_ok=True)
@@ -293,8 +299,8 @@ class SECFilerRefreshBundleModel(CallableModel):
             key=key,
             stage="extract",
             status=status,
-            dataset=self.dataset_name,
-            uri=_artifact_uri(self.output, key),
+            dataset=self._name,
+            uri=_artifact_uri(self._store, key),
             media_type=self.media_type,
             metadata=metadata,
         )

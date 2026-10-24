@@ -864,7 +864,7 @@ def test_massive_daily_ticker_summary_artifact_writer_materializes_parquet_retur
 
 
 def test_massive_flat_file_transfer_explain_plans_stock_source_and_output():
-    payload = MassiveFlatFileTransferModel(dataset="trades", output=NoOpArtifactStore(), explain=True)(["2025-11-05"]).value
+    payload = MassiveFlatFileTransferModel(flat_file="trades", output=NoOpArtifactStore(), explain=True)(["2025-11-05"]).value
 
     assert payload["dataset"] == "massive-stocks-flat-files-trades"
     assert payload["source_key"] == "us_stocks_sip/trades_v1/2025/11/2025-11-05.csv.gz"
@@ -904,7 +904,7 @@ def test_massive_flat_file_transfer_downloads_and_writes_output(tmp_path):
 
     source_client = FakeSourceClient()
     output = FakeOutput()
-    model = MassiveFlatFileTransferModel(dataset="quotes", source_client=source_client, output=output, local_dir=tmp_path)
+    model = MassiveFlatFileTransferModel(flat_file="quotes", source_client=source_client, output=output, local_dir=tmp_path)
 
     payload = model(["2025-11-05"]).value
 
@@ -935,7 +935,7 @@ def test_massive_flat_file_transfer_records_unavailable_dates_when_asked(tmp_pat
         def write_file(self, key, path, media_type=None, metadata=None):
             raise AssertionError("unavailable dates must not be written")
 
-    model = MassiveFlatFileTransferModel(dataset="trades", source_client=FakeSourceClient(), output=FakeOutput(), local_dir=tmp_path)
+    model = MassiveFlatFileTransferModel(flat_file="trades", source_client=FakeSourceClient(), output=FakeOutput(), local_dir=tmp_path)
 
     with pytest.raises(Forbidden):
         model(["2019-11-05"])
@@ -1311,3 +1311,19 @@ def test_massive_daily_aggregate_backfill_downloads_each_business_day(monkeypatc
         {"ticker": "AAA", "date": "2024-01-08"},
         {"ticker": "AAA", "date": "2024-01-09"},
     ]
+
+
+def test_massive_flat_file_transfer_plans_dataset_keys_and_skips_dates_before_it():
+    from ccflow_etl import DatasetDefinition
+
+    dataset = DatasetDefinition(
+        name="raw-trades", key_template="raw/trades/{year}/{date}.csv.gz", store=NoOpArtifactStore(), format="csv.gz", first_date=date(2021, 10, 11)
+    )
+    model = MassiveFlatFileTransferModel(flat_file="trades", dataset=dataset, explain=True)
+
+    planned = model(["2025-11-05"]).value
+    early = model(["2021-10-08"]).value
+
+    assert (planned["status"], planned["dataset"], planned["output_key"]) == ("planned", "raw-trades", "raw/trades/2025/2025-11-05.csv.gz")
+    assert planned["source_key"] == "us_stocks_sip/trades_v1/2025/11/2025-11-05.csv.gz"
+    assert early["status"] == "before_first_date"

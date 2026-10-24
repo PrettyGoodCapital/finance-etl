@@ -4,7 +4,7 @@ import re
 from datetime import UTC, date, datetime
 from typing import Any
 
-from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList
+from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList, ModelRegistry
 from ccflow_etl import (
     APITokenCredentials,
     ArtifactReadContext,
@@ -18,6 +18,8 @@ from ccflow_etl import (
 from ccflow_http import HTTPModel, HTTPRequest, HTTPRequestContext, HTTPRetryPolicy, RedactionPolicy
 from ccflow_http.base import HTTPContext, HTTPMethod
 from pydantic import Field
+
+from finance_etl.providers._dataset_output import DatasetOutputMixin
 
 __all__ = (
     "OpenFIGICredentials",
@@ -73,7 +75,7 @@ def openfigi_ticker_queries(ticker: str) -> list[str]:
     return [ticker]
 
 
-class OpenFIGIMappingCaptureModel(CallableModel):
+class OpenFIGIMappingCaptureModel(DatasetOutputMixin, CallableModel):
     """Capture OpenFIGI mappings for the records in a dated listings snapshot that have no composite FIGI.
 
     Each record is looked up by ticker on the US composite exchange, trying the forms from
@@ -82,6 +84,7 @@ class OpenFIGIMappingCaptureModel(CallableModel):
     """
 
     mapping_model: OpenFIGIMappingModel = Field(default_factory=OpenFIGIMappingModel)
+    snapshot: DatasetDefinition | None = Field(default=None, description="Snapshot dataset; replaces snapshot_store and snapshot_key_template.")
     snapshot_store: Any | None = Field(default=None, description="Store holding the snapshots; defaults to output.")
     snapshot_key_template: str = "massive/stocks/rest/all-tickers/{date}.json"
     snapshot_model: CallableModel | None = Field(default=None, description="Model that produces the snapshot for a date, declared as a dependency.")
@@ -113,10 +116,15 @@ class OpenFIGIMappingCaptureModel(CallableModel):
         return f"{self.output_key_prefix.strip('/')}/jsonl/{context.date.isoformat()}.jsonl.gz"
 
     def snapshot_key(self, value: date) -> str:
-        return self.snapshot_key_template.format(date=value.isoformat())
+        return self.snapshot.key(value) if self.snapshot is not None else self.snapshot_key_template.format(date=value.isoformat())
+
+    def _snapshot_store(self) -> Any:
+        if self.snapshot is not None:
+            return ModelRegistry.root()[self.snapshot.store] if isinstance(self.snapshot.store, str) else self.snapshot.store
+        return self.snapshot_store if self.snapshot_store is not None else self._store
 
     def _artifact_uri(self, key: str) -> str:
-        store = self.output
+        store = self._store
         if hasattr(store, "artifact_uri"):
             return store.artifact_uri(key)
         if hasattr(store, "uri"):
@@ -124,9 +132,9 @@ class OpenFIGIMappingCaptureModel(CallableModel):
         return key
 
     def _will_fetch(self, context: DateContext) -> bool:
-        if self.explain or self.output is None:
+        if self.explain or self._store is None or self._before_first_date(context):
             return False
-        return self.overwrite_output or not (hasattr(self.output, "exists") and self.output.exists(self.output_key(context)))
+        return self.overwrite_output or not (hasattr(self._store, "exists") and self._store.exists(self._key(context)))
 
     def _snapshot_context(self, context: DateContext) -> ContextType:
         assert self.snapshot_model is not None
@@ -139,7 +147,7 @@ class OpenFIGIMappingCaptureModel(CallableModel):
         return [(self.snapshot_model, [self._snapshot_context(context)])]
 
     def _records(self, value: date) -> list[dict[str, Any]] | None:
-        store = self.snapshot_store if self.snapshot_store is not None else self.output
+        store = self._snapshot_store()
         key = self.snapshot_key(value)
         if hasattr(store, "exists") and not store.exists(key):
             return None
@@ -176,23 +184,23 @@ class OpenFIGIMappingCaptureModel(CallableModel):
 
     @Flow.call
     def __call__(self, context: DateContext) -> GenericResult:
-        key = self.output_key(context)
+        key = self._key(context)
         plan = {
-            "dataset": self.dataset_name,
+            "dataset": self._name,
             "date": context.date.isoformat(),
             "snapshot_key": self.snapshot_key(context.date),
             "output_key": key,
             "output_uri": self._artifact_uri(key),
         }
+        if self._before_first_date(context):
+            return GenericResult(value={**plan, "status": "before_first_date", "output_writes": []})
         if self.explain:
             return GenericResult(value={**plan, "status": "planned", "will_call_network": False})
-        if self.output is None:
+        if self._store is None:
             raise ValueError("OpenFIGI mapping capture requires output.")
-        metadata = {"date": plan["date"], "provider": "openfigi", "dataset": self.dataset_name}
+        metadata = {"date": plan["date"], "provider": "openfigi", "dataset": self._name}
         if not self._will_fetch(context):
-            artifact = ETLArtifact(
-                key=key, stage="extract", status="exists", dataset=self.dataset_name, uri=plan["output_uri"], media_type=self.media_type
-            )
+            artifact = ETLArtifact(key=key, stage="extract", status="exists", dataset=self._name, uri=plan["output_uri"], media_type=self.media_type)
             return GenericResult(value={**plan, "status": "exists", "output_writes": [artifact.model_dump(mode="json")]})
         if self.snapshot_model is not None:
             self.snapshot_model(self._snapshot_context(context))
@@ -211,12 +219,12 @@ class OpenFIGIMappingCaptureModel(CallableModel):
         counts = {status: sum(row["status"] == status for row in rows) for status in ("matched", "no_match", "skipped")}
         payload = gzip.compress(b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows))
         metadata = {**metadata, "record_count": len(rows), **{f"{status}_count": count for status, count in counts.items()}}
-        write = ArtifactWriteModel(store=self.output)(
+        write = ArtifactWriteModel(store=self._store)(
             ArtifactWriteContext(
                 key=key,
                 payload=payload,
                 media_type=self.media_type,
-                dataset=self.dataset_name,
+                dataset=self._name,
                 stage="extract",
                 overwrite=self.overwrite_output,
                 metadata=metadata,

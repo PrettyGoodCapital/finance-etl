@@ -178,3 +178,44 @@ def test_openfigi_cusip_capture_maps_cusips_then_isins_and_waits_for_the_master(
     assert rows["AACI"]["matches"][0]["figiKind"] == "composite"
     assert rows["ZZZZ"]["status"] == "no_cusip" and "AAPL" not in rows
     assert model(day).value["status"] == "exists"
+
+
+def test_openfigi_figi_capture_maps_only_newly_listed_securities(tmp_path):
+    from datetime import date
+
+    import polars as pl
+    from ccflow_etl import DatasetDefinition, LocalFileOutput
+
+    from finance_etl.providers.openfigi import OpenFIGIFigiCaptureModel
+
+    store = LocalFileOutput(path=tmp_path)
+    listings = DatasetDefinition(name="listings", key_template="curated/listings/{date}.parquet", store=store)
+    output = DatasetDefinition(name="figi", key_template="raw/figi/{date}.jsonl.gz", store=store, format="jsonl.gz")
+    listings.write_frame(date(2025, 1, 6), pl.DataFrame({"ticker": ["AAPL", "FB", "X"], "security_id": ["BBG1", "BBG2", None]}))
+    listings.write_frame(date(2025, 1, 7), pl.DataFrame({"ticker": ["AAPL", "META", "NEW"], "security_id": ["BBG1", "BBG2", "BBG3"]}))
+    requests = []
+
+    class FakeMappingModel(OpenFIGIMappingModel):
+        @Flow.call
+        def __call__(self, context):
+            requests.append([(job["idType"], job["idValue"]) for job in context.json_body])
+            known = {"BBG1": {"ticker": "AAPL", "exchCode": "US"}, "BBG2": {"ticker": "META", "exchCode": "US"}}
+            return HTTPResult(
+                value=[
+                    {"data": [known[job["idValue"]]]} if job["idValue"] in known else {"warning": "No identifier found."} for job in context.json_body
+                ],
+                status_code=200,
+            )
+
+    model = OpenFIGIFigiCaptureModel(mapping_model=FakeMappingModel(), listings=listings, output=output)
+
+    first = model(date(2025, 1, 6)).value
+    second = model(date(2025, 1, 7)).value
+    rows = [json.loads(line) for line in gzip.decompress(output.read_bytes(date(2025, 1, 6))).splitlines()]
+
+    assert (first["figi_count"], first["matched_count"], first["previous_date"]) == (2, 2, None)
+    assert [(row["figi"], row["matches"][0]["ticker"]) for row in rows] == [("BBG1", "AAPL"), ("BBG2", "META")]
+    assert (second["figi_count"], second["matched_count"], second["previous_date"]) == (1, 0, "2025-01-06")
+    assert requests == [[("ID_BB_GLOBAL", "BBG1"), ("ID_BB_GLOBAL", "BBG2")], [("ID_BB_GLOBAL", "BBG3")]]
+    assert model(date(2025, 1, 7)).value["status"] == "exists"
+    assert model(date(2025, 1, 8)).value["status"] == "no_listings"

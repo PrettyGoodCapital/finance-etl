@@ -1,11 +1,19 @@
 import gzip
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from ccflow import CallableModel, DateContext, Flow, GenericResult, GraphDepList
-from ccflow_etl import ArtifactReadContext, ArtifactReadModel, ArtifactWriteContext, ArtifactWriteModel, ETLArtifact, ExecutionPolicy
+from ccflow import CallableModel, DateContext, Flow, GenericResult, GraphDepList, ModelRegistry
+from ccflow_etl import (
+    ArtifactReadContext,
+    ArtifactReadModel,
+    ArtifactWriteContext,
+    ArtifactWriteModel,
+    DatasetDefinition,
+    ETLArtifact,
+    ExecutionPolicy,
+)
 from ccflow_http import HTTPModel, HTTPRequest, HTTPRequestContext
 from ccflow_http.base import ResponseFormat
 from pydantic import Field, model_validator
@@ -13,12 +21,14 @@ from pydantic import Field, model_validator
 from finance_etl.providers._dataset_output import DatasetOutputMixin
 
 __all__ = (
+    "SECCompanyNamesModel",
     "SECDailyIndexContext",
     "SECDailyIndexExtractModel",
     "SECDailyIndexModel",
     "SECDateContext",
     "SECFilerRefreshBundleModel",
     "SECHTTPModel",
+    "company_name_windows",
     "parse_master_index",
 )
 
@@ -305,3 +315,135 @@ class SECFilerRefreshBundleModel(DatasetOutputMixin, CallableModel):
             metadata=metadata,
         )
         return GenericResult(value={**plan, "status": status, "filer_count": len(filers), "output_writes": [artifact.model_dump(mode="json")]})
+
+
+def _day(value: str | None) -> date | None:
+    return date.fromisoformat(value[:10]) if value else None
+
+
+def company_name_windows(submissions: dict[str, Any]) -> list[dict[str, Any]]:
+    """Name windows for one company from its SEC submissions JSON: each former name, then the current name.
+
+    ``valid_from`` and ``valid_to`` are inclusive dates; the current name is open-ended. The company's CIK (10 digits),
+    entity type, and SIC code are repeated on every window.
+    """
+    cik = f"{int(submissions['cik']):010d}"
+    common = {
+        "cik": cik,
+        "entity_type": submissions.get("entityType"),
+        "sic": submissions.get("sic"),
+        "sic_description": submissions.get("sicDescription"),
+    }
+    former = sorted((item for item in submissions.get("formerNames") or [] if item.get("name")), key=lambda item: item.get("from") or "")
+    windows = [{**common, "name": item["name"], "valid_from": _day(item.get("from")), "valid_to": _day(item.get("to"))} for item in former]
+    last_to = max((window["valid_to"] for window in windows if window["valid_to"]), default=None)
+    if submissions.get("name"):
+        windows.append({**common, "name": submissions["name"], "valid_from": last_to + timedelta(days=1) if last_to else None, "valid_to": None})
+    return windows
+
+
+def _resolve(store: Any) -> Any:
+    return ModelRegistry.root()[store] if isinstance(store, str) else store
+
+
+class SECCompanyNamesModel(CallableModel):
+    """Build every SEC filer's name history, as known on a date, from a submissions bulk file and later filer refreshes.
+
+    The latest bulk ``submissions`` capture on or before the date supplies every company's current and former names.
+    Filer refresh bundles after that capture, up to the date, replace the names of the companies that filed. The bulk
+    file is downloaded to the workspace and read entry by entry, so it is never held in memory.
+    """
+
+    submissions: DatasetDefinition = Field(description="Bulk submissions.zip captures, partitioned by capture date.")
+    refreshes: DatasetDefinition | None = Field(
+        default=None, description="Filer refresh bundles: JSONL rows with cik, submissions_status, and submissions."
+    )
+    output: DatasetDefinition
+    workspace: Path = Path("/tmp/finance-etl/sec-company-names")
+    lookback_days: int = Field(default=400, ge=1, description="How far back to look for a bulk capture on or before the date.")
+    explain: bool = False
+    overwrite_output: bool = False
+
+    @property
+    def context_type(self) -> type[DateContext]:
+        return DateContext
+
+    @property
+    def result_type(self) -> type[GenericResult]:
+        return GenericResult
+
+    def _baseline(self, value: date) -> date | None:
+        dates = self.submissions.partitions(value - timedelta(days=self.lookback_days), value)
+        return next((day for day in reversed(dates) if self.submissions.exists(day)), None)
+
+    def _bulk_windows(self, value: date) -> dict[str, list[dict[str, Any]]]:
+        import zipfile
+
+        path = self.workspace / f"submissions-{value.isoformat()}.zip"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        store, key = _resolve(self.submissions.store), self.submissions.key(value)
+        try:
+            if hasattr(store, "read_file"):
+                store.read_file(key, path)
+            else:
+                path.write_bytes(self.submissions.read_bytes(value))
+            windows: dict[str, list[dict[str, Any]]] = {}
+            with zipfile.ZipFile(path) as archive:
+                for member in archive.namelist():
+                    # Paginated filing lists (CIK...-submissions-001.json) carry no names.
+                    if not member.endswith(".json") or "-submissions-" in member:
+                        continue
+                    company = company_name_windows(json.loads(archive.read(member)))
+                    if company:
+                        windows[company[0]["cik"]] = company
+            return windows
+        finally:
+            path.unlink(missing_ok=True)
+
+    @Flow.call
+    def __call__(self, context: DateContext) -> GenericResult:
+        import polars as pl
+
+        plan = {**self.output.plan(context.date), "submissions": self.submissions.name}
+        if self.explain:
+            return GenericResult(value={**plan, "status": "planned"})
+        if not self.overwrite_output and self.output.exists(context.date):
+            return GenericResult(value={**plan, "status": "exists"})
+        baseline = self._baseline(context.date)
+        if baseline is None:
+            return GenericResult(value={**plan, "status": "no_baseline"})
+        windows = self._bulk_windows(baseline)
+        refreshed = []
+        if self.refreshes is not None:
+            for day in self.refreshes.partitions(baseline + timedelta(days=1), context.date):
+                if not self.refreshes.exists(day):
+                    continue
+                for line in gzip.decompress(self.refreshes.read_bytes(day)).splitlines():
+                    row = json.loads(line)
+                    if row.get("submissions_status") == 200 and isinstance(row.get("submissions"), dict):
+                        company = company_name_windows(row["submissions"])
+                        if company:
+                            windows[company[0]["cik"]] = company
+                refreshed.append(day.isoformat())
+        frame = pl.DataFrame(
+            [window for company in windows.values() for window in company],
+            schema={
+                "cik": pl.String,
+                "name": pl.String,
+                "valid_from": pl.Date,
+                "valid_to": pl.Date,
+                "entity_type": pl.String,
+                "sic": pl.String,
+                "sic_description": pl.String,
+            },
+        ).sort("cik", "valid_from", nulls_last=False)
+        lineage = {
+            "sources": {"submissions": self.submissions.uri(baseline), "refreshes": refreshed},
+            "quality": {
+                "company_count": len(windows),
+                "row_count": frame.height,
+                "renamed_company_count": int((frame.group_by("cik").len()["len"] > 1).sum()),
+            },
+        }
+        writes = self.output.write_frame(context.date, frame, lineage=lineage, overwrite=self.overwrite_output)
+        return GenericResult(value={**plan, "status": "written", "baseline": baseline.isoformat(), **lineage["quality"], "output_writes": writes})

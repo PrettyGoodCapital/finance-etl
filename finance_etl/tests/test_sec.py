@@ -158,3 +158,58 @@ def test_us_federal_calendar_excludes_configured_closures():
 
     assert date(2025, 1, 9) not in calendar.business_days(date(2025, 1, 6), date(2025, 1, 10))
     assert date(2025, 1, 8) in calendar.business_days(date(2025, 1, 6), date(2025, 1, 10))
+
+
+def test_sec_company_names_build_name_windows_from_bulk_and_refreshes(tmp_path):
+    import gzip
+    import io
+    import json
+    import zipfile
+    from datetime import date
+
+    from ccflow_etl import DatasetDefinition, LocalFileOutput
+
+    from finance_etl.providers.sec import SECCompanyNamesModel
+
+    store = LocalFileOutput(path=tmp_path / "store")
+    submissions = DatasetDefinition(name="subs", key_template="sec/submissions/{date}.zip", store=store, format="bytes")
+    refreshes = DatasetDefinition(name="refresh", key_template="sec/refresh/{date}.jsonl.gz", store=store, format="jsonl.gz")
+    output = DatasetDefinition(name="names", key_template="curated/names/{date}.parquet", store=store)
+    meta = {
+        "cik": "1326801",
+        "name": "Meta Platforms, Inc.",
+        "entityType": "operating",
+        "sic": "7370",
+        "sicDescription": "Services-Computer Programming",
+        "formerNames": [{"name": "FACEBOOK INC", "from": "2012-02-01T00:00:00.000Z", "to": "2021-10-27T00:00:00.000Z"}],
+    }
+    apple = {"cik": "320193", "name": "Apple Inc.", "formerNames": []}
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("CIK0001326801.json", json.dumps(meta))
+        archive.writestr("CIK0000320193.json", json.dumps(apple))
+        archive.writestr("CIK0000320193-submissions-001.json", json.dumps({"filings": []}))
+    submissions.write_bytes(date(2026, 10, 16), buffer.getvalue())
+    renamed = {
+        **apple,
+        "name": "Apple Computer 2",
+        "formerNames": [{"name": "Apple Inc.", "from": "2007-01-09T00:00:00.000Z", "to": "2026-10-19T00:00:00.000Z"}],
+    }
+    refreshes.write_bytes(
+        date(2026, 10, 20), gzip.compress(json.dumps({"cik": "320193", "submissions_status": 200, "submissions": renamed}).encode())
+    )
+
+    model = SECCompanyNamesModel(submissions=submissions, refreshes=refreshes, output=output, workspace=tmp_path / "work")
+    result = model(date(2026, 10, 21)).value
+    names = output.read_frame(date(2026, 10, 21)).sort("cik", "valid_from", nulls_last=False)
+
+    assert (result["status"], result["baseline"], result["company_count"], result["renamed_company_count"]) == ("written", "2026-10-16", 2, 2)
+    assert names.select("cik", "name", "valid_from", "valid_to").rows() == [
+        ("0000320193", "Apple Inc.", date(2007, 1, 9), date(2026, 10, 19)),
+        ("0000320193", "Apple Computer 2", date(2026, 10, 20), None),
+        ("0001326801", "FACEBOOK INC", date(2012, 2, 1), date(2021, 10, 27)),
+        ("0001326801", "Meta Platforms, Inc.", date(2021, 10, 28), None),
+    ]
+    assert names["sic_description"].to_list()[2] == "Services-Computer Programming"
+    assert not list((tmp_path / "work").glob("*.zip"))
+    assert model(date(2026, 10, 1)).value["status"] == "no_baseline"

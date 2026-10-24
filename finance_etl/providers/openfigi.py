@@ -1,7 +1,7 @@
 import gzip
 import json
 import re
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList, ModelRegistry
@@ -24,6 +24,7 @@ from finance_etl.providers._dataset_output import DatasetOutputMixin
 __all__ = (
     "OpenFIGICredentials",
     "OpenFIGICusipCaptureModel",
+    "OpenFIGIFigiCaptureModel",
     "OpenFIGIMappingCaptureModel",
     "OpenFIGIMappingModel",
     "isin_from_cusip",
@@ -367,3 +368,74 @@ class OpenFIGICusipCaptureModel(CallableModel):
         return GenericResult(
             value={**plan, "status": "written", "record_count": len(rows), **{f"{k}_count": v for k, v in counts.items()}, "output_writes": writes}
         )
+
+
+class OpenFIGIFigiCaptureModel(CallableModel):
+    """Capture OpenFIGI's description of the securities that appear in a session's listings for the first time.
+
+    A security is new when its ``security_id`` (a FIGI) is not in the previous session's listings, so the first
+    session captures every listed security and later sessions capture new listings and re-listings. Each FIGI is
+    mapped as ``ID_BB_GLOBAL``, which returns its ticker, exchange code, name, security type, and share-class FIGI as
+    OpenFIGI describes them on the capture date.
+    """
+
+    mapping_model: OpenFIGIMappingModel = Field(default_factory=OpenFIGIMappingModel)
+    listings: DatasetDefinition = Field(description="Listings partitions with a security_id column of FIGIs.")
+    output: DatasetDefinition
+    lookback_days: int = Field(default=10, ge=1, description="How far back to look for the previous listings session.")
+    explain: bool = False
+    overwrite_output: bool = False
+
+    @property
+    def context_type(self) -> type[DateContext]:
+        return DateContext
+
+    @property
+    def result_type(self) -> type[GenericResult]:
+        return GenericResult
+
+    def _previous_session(self, value: date) -> date | None:
+        sessions = self.listings.partitions(value - timedelta(days=self.lookback_days), value - timedelta(days=1))
+        return next((day for day in reversed(sessions) if self.listings.exists(day)), None)
+
+    def _figis(self, value: date) -> set[str]:
+        frame = self.listings.read_frame(value)
+        return {figi for figi in frame["security_id"].to_list() if figi}
+
+    def _map(self, figis: list[str]) -> list[dict[str, Any]]:
+        responses = []
+        for start in range(0, len(figis), _MAX_JOBS_PER_REQUEST):
+            jobs = [{"idType": "ID_BB_GLOBAL", "idValue": figi} for figi in figis[start : start + _MAX_JOBS_PER_REQUEST]]
+            result = self.mapping_model(HTTPRequestContext(json_body=jobs))
+            responses.extend(result.value if isinstance(result.value, list) else [])
+        return responses
+
+    @Flow.call
+    def __call__(self, context: DateContext) -> GenericResult:
+        plan = {**self.output.plan(context.date), "listings": self.listings.name}
+        if self.explain:
+            return GenericResult(value={**plan, "status": "planned", "will_call_network": False})
+        if not self.overwrite_output and self.output.exists(context.date):
+            return GenericResult(value={**plan, "status": "exists"})
+        if not self.listings.exists(context.date):
+            return GenericResult(value={**plan, "status": "no_listings"})
+        previous = self._previous_session(context.date)
+        figis = sorted(self._figis(context.date) - (self._figis(previous) if previous is not None else set()))
+        captured_at = datetime.now(UTC).isoformat()
+        rows = []
+        for figi, response in zip(figis, self._map(figis), strict=False):
+            data = response.get("data") or []
+            rows.append(
+                {
+                    "date": context.date.isoformat(),
+                    "captured_at": captured_at,
+                    "figi": figi,
+                    "status": "matched" if data else "no_match",
+                    "matches": data,
+                }
+            )
+        payload = gzip.compress(b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows))
+        matched = sum(row["status"] == "matched" for row in rows)
+        metadata = {"previous_date": previous.isoformat() if previous else None, "figi_count": len(rows), "matched_count": matched}
+        writes = self.output.write_bytes(context.date, payload, metadata=metadata, overwrite=self.overwrite_output)
+        return GenericResult(value={**plan, "status": "written", **metadata, "output_writes": writes})

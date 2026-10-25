@@ -336,7 +336,7 @@ def company_name_windows(submissions: dict[str, Any]) -> list[dict[str, Any]]:
     }
     former = sorted((item for item in submissions.get("formerNames") or [] if item.get("name")), key=lambda item: item.get("from") or "")
     windows = [{**common, "name": item["name"], "valid_from": _day(item.get("from")), "valid_to": _day(item.get("to"))} for item in former]
-    last_to = max((window["valid_to"] for window in windows if window["valid_to"]), default=None)
+    last_to = max(filter(None, (_day(item.get("to")) for item in former)), default=None)
     if submissions.get("name"):
         windows.append({**common, "name": submissions["name"], "valid_from": last_to + timedelta(days=1) if last_to else None, "valid_to": None})
     return windows

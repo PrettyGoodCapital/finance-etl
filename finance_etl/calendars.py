@@ -5,7 +5,7 @@ from typing import cast
 
 from ccflow import ModelRegistry
 from ccflow_etl import BaseCalendar
-from finance_dates import COUNTRY_CODES, COUNTRY_CODES3, EXCHANGE_CODES, Calendar
+from finance_dates import COUNTRY_CODES, COUNTRY_CODES3, EXCHANGE_CODES, Calendar as _NativeCalendar
 from pydantic import Field
 
 __all__ = (
@@ -22,6 +22,10 @@ __all__ = (
     "USFederalCalendar",
 )
 
+
+if _NativeCalendar is None:
+    raise ImportError("finance_etl calendars require the finance_dates native extension")
+Calendar = _NativeCalendar
 
 _EXCHANGE_CODE_SET = frozenset(EXCHANGE_CODES)
 _COUNTRY_CODE_SET = frozenset((*COUNTRY_CODES, *COUNTRY_CODES3))

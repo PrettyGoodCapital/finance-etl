@@ -34,6 +34,9 @@ class DatasetOutputMixin(BaseModel):
         value = context.date
         return value if isinstance(value, date) else date.fromisoformat(str(value))
 
+    def output_key(self, context: Any) -> str:
+        raise NotImplementedError
+
     def _key(self, context: Any) -> str:
         return self.dataset.key(self._partition_date(context)) if self.dataset is not None else self.output_key(context)
 

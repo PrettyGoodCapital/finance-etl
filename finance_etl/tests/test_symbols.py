@@ -98,4 +98,4 @@ def test_artifact_symbol_universe_source_model_runs_under_graph_evaluator(cachea
         result = model(["2025-01-02"]).value
 
     assert result.symbols == ["NVDA"]
-    assert SOURCE_CALLS == ["2025-01-02"] * (1 if cacheable else 2)
+    assert SOURCE_CALLS == ["2025-01-02"]

@@ -57,10 +57,10 @@ hydra:
 
 The config registers:
 
-| Registry Path | Purpose |
+| Registry Path                         | Purpose                                                                                                  |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `/credentials/providers/massive/rest` | REST API token read from `MASSIVE_API_KEY`. |
-| `/credentials/massive_flat_files` | Key/secret credentials for Massive flat-file S3 access using `MASSIVE_API_KEY_ID` and `MASSIVE_API_KEY`. |
+| `/credentials/providers/massive/rest` | REST API token read from `MASSIVE_API_KEY`.                                                              |
+| `/credentials/massive_flat_files`     | Key/secret credentials for Massive flat-file S3 access using `MASSIVE_API_KEY_ID` and `MASSIVE_API_KEY`. |
 
 Credentials stay in environment variables or deployment-specific overlays. Public package configs describe which credential shape is needed; they do not contain private secrets.
 

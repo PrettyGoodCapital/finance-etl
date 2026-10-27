@@ -18,10 +18,11 @@ __all__ = (
 
 # FRED allows 120 requests a minute per API key.
 _DEFAULT_FRED_POLICY = ExecutionPolicy(min_interval_seconds=0.6)
-# The earliest and latest real-time dates FRED accepts; together they request every vintage.
-_REALTIME_START = date(1776, 7, 4)
+# The latest real-time date FRED accepts, meaning the vintage is still current.
 _REALTIME_END = date(9999, 12, 31)
 _PAGE_LIMIT = 100000
+# FRED rejects observation requests whose real-time range spans too many vintage dates, so long histories are split.
+_VINTAGES_PER_REQUEST = 1000
 
 
 class FREDCredentials(APITokenCredentials):
@@ -54,7 +55,7 @@ class FREDCaptureModel(CallableModel):
 
     Each row holds one series: its ``/fred/series`` metadata (including notes, where copyright terms appear) and, for
     series in ``series``, every observation whose vintage began on or after the requested real-time start. With
-    ``realtime_lookback_days`` unset the capture requests every vintage (a baseline); otherwise it requests vintages
+    ``realtime_lookback_days`` unset the capture requests every vintage since ``observation_start`` (a baseline); otherwise it requests vintages
     that began within that many days of the capture date, which a daily run uses to pick up new releases and
     revisions. Series in ``metadata_only`` get metadata alone, for reviewing their terms before capture.
     """
@@ -83,7 +84,7 @@ class FREDCaptureModel(CallableModel):
         result = http_model(HTTPRequestContext(path=path, query={key: str(value) for key, value in query.items()}))
         if result.status_code == 400:
             # FRED explains a rejected request in error_message; surface it with the series.
-            message = result.value.get("error_message") if isinstance(result.value, dict) else result.value
+            message = (result.value.get("error_message") if isinstance(result.value, dict) else None) or str(result.value)[:500]
             raise RuntimeError(f"FRED rejected {path} for {query.get('series_id')}: {message}")
         return result.value
 
@@ -92,7 +93,20 @@ class FREDCaptureModel(CallableModel):
         series = payload.get("seriess") if isinstance(payload, dict) else None
         return series[0] if series else {}
 
-    def _observations(self, series_id: str, realtime_start: date) -> list[dict[str, Any]]:
+    def _vintage_dates(self, series_id: str, realtime_start: date) -> list[date]:
+        dates: list[date] = []
+        offset = 0
+        while True:
+            payload = self._get(
+                "/fred/series/vintagedates", {"series_id": series_id, "realtime_start": realtime_start.isoformat(), "limit": 10000, "offset": offset}
+            )
+            page = payload.get("vintage_dates", []) if isinstance(payload, dict) else []
+            dates.extend(date.fromisoformat(value) for value in page)
+            offset += len(page)
+            if not page or offset >= int(payload.get("count", 0)):
+                return dates
+
+    def _observation_pages(self, series_id: str, realtime_start: date, realtime_end: date) -> list[dict[str, Any]]:
         observations: list[dict[str, Any]] = []
         offset = 0
         while True:
@@ -102,7 +116,7 @@ class FREDCaptureModel(CallableModel):
                     "series_id": series_id,
                     "observation_start": self.observation_start.isoformat(),
                     "realtime_start": realtime_start.isoformat(),
-                    "realtime_end": _REALTIME_END.isoformat(),
+                    "realtime_end": realtime_end.isoformat(),
                     "limit": _PAGE_LIMIT,
                     "offset": offset,
                 },
@@ -113,8 +127,24 @@ class FREDCaptureModel(CallableModel):
             if not page or offset >= int(payload.get("count", 0)):
                 return observations
 
+    def _observations(self, series_id: str, realtime_start: date) -> list[dict[str, Any]]:
+        """Observations whose vintage began on or after ``realtime_start``, split into requests of bounded vintage count.
+
+        Each request ends the day before the next one's first vintage, so the windows cover the whole range.
+        """
+        vintages = self._vintage_dates(series_id, realtime_start) if self.realtime_lookback_days is None else []
+        if len(vintages) <= _VINTAGES_PER_REQUEST:
+            return self._observation_pages(series_id, realtime_start, _REALTIME_END)
+        chunks = [vintages[start : start + _VINTAGES_PER_REQUEST] for start in range(0, len(vintages), _VINTAGES_PER_REQUEST)]
+        observations = []
+        for index, chunk in enumerate(chunks):
+            end = chunks[index + 1][0] - timedelta(days=1) if index + 1 < len(chunks) else _REALTIME_END
+            observations.extend(self._observation_pages(series_id, realtime_start if index == 0 else chunk[0], end))
+        return observations
+
     def _realtime_start(self, value: date) -> date:
-        return value - timedelta(days=self.realtime_lookback_days) if self.realtime_lookback_days else _REALTIME_START
+        # A baseline starts at the earliest observation requested: no vintage before it can hold those observations.
+        return value - timedelta(days=self.realtime_lookback_days) if self.realtime_lookback_days else self.observation_start
 
     @Flow.call
     def __call__(self, context: DateContext) -> GenericResult:

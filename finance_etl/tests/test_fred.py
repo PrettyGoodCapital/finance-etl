@@ -24,14 +24,20 @@ def test_fred_http_model_adds_json_format_and_redacted_api_key(monkeypatch):
 
 class FakeFRED(FREDHTTPModel):
     pages: dict = Field(default_factory=dict)
+    vintages: dict = Field(default_factory=dict)
+    requests: list = Field(default_factory=list)
 
     @Flow.call
     def __call__(self, context):
         query = context.query
+        if context.path == "/fred/series/vintagedates":
+            dates = self.vintages.get(query["series_id"], [])
+            return HTTPResult(value={"count": len(dates), "vintage_dates": dates[int(query["offset"]) :]}, status_code=200)
         if context.path == "/fred/series":
             return HTTPResult(
                 value={"seriess": [{"id": query["series_id"], "title": f"{query['series_id']} title", "notes": "Public domain."}]}, status_code=200
             )
+        self.requests.append((query["realtime_start"], query["realtime_end"]))
         observations = self.pages[(query["series_id"], query["realtime_start"])]
         offset = int(query["offset"])
         page = observations[offset : offset + 2]
@@ -50,7 +56,7 @@ def test_fred_capture_pages_observations_and_keeps_metadata_only_series(tmp_path
         _observation("2024-02-01", ".", "2024-03-01"),
     ]
     model = FREDCaptureModel(
-        http_model=FakeFRED(pages={("PAYEMS", "1776-07-04"): observations}),
+        http_model=FakeFRED(pages={("PAYEMS", "2021-10-11"): observations}, vintages={"PAYEMS": ["2024-02-01", "2024-02-29", "2024-03-01"]}),
         series=["PAYEMS"],
         metadata_only=["UMCSENT"],
         observation_start=date(2021, 10, 11),
@@ -108,3 +114,23 @@ def test_fred_capture_surfaces_fred_error_messages(tmp_path):
 
     with pytest.raises(RuntimeError, match="DFF: Bad Request. Too many vintage dates."):
         model(date(2026, 10, 27))
+
+
+def test_fred_baseline_splits_long_vintage_histories_into_contiguous_windows(tmp_path, monkeypatch):
+    from finance_etl.providers import fred
+
+    monkeypatch.setattr(fred, "_VINTAGES_PER_REQUEST", 2)
+    output = DatasetDefinition(name="fred", key_template="raw/fred/{date}.jsonl.gz", store=LocalFileOutput(path=tmp_path), format="jsonl.gz")
+    http = FakeFRED(
+        vintages={"DFF": ["2021-10-12", "2021-10-13", "2021-10-14", "2021-10-18", "2021-10-19"]},
+        pages={
+            ("DFF", "2021-10-11"): [_observation("2021-10-11", "0.08", "2021-10-12", "2021-10-13")],
+            ("DFF", "2021-10-14"): [],
+            ("DFF", "2021-10-19"): [],
+        },
+    )
+    model = FREDCaptureModel(http_model=http, series=["DFF"], observation_start=date(2021, 10, 11), output=output)
+
+    assert model(date(2026, 10, 27)).value["observation_count"] == 1
+    # Each window ends the day before the next window's first vintage; the last stays open.
+    assert http.requests == [("2021-10-11", "2021-10-13"), ("2021-10-14", "2021-10-18"), ("2021-10-19", "9999-12-31")]

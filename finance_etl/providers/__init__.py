@@ -3,11 +3,12 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .fred import *
     from .massive import *
     from .openfigi import *
     from .sec import *
 
-_SUBMODULES = ("massive", "openfigi", "sec")
+_SUBMODULES = ("fred", "massive", "openfigi", "sec")
 _EXPORTS: dict[str, str] | None = None
 
 

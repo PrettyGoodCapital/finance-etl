@@ -92,3 +92,19 @@ def test_fred_observations_merge_baseline_and_daily_captures_into_vintages(tmp_p
         (date(2026, 9, 1), 101.0, date(2026, 11, 7), None),
     ]
     assert FREDObservationsModel(baseline=baseline, output=output, overwrite_output=True)(date(2026, 10, 1)).value["status"] == "no_baseline"
+
+
+def test_fred_capture_surfaces_fred_error_messages(tmp_path):
+    import pytest
+
+    class RejectingFRED(FREDHTTPModel):
+        @Flow.call
+        def __call__(self, context):
+            assert 400 in self.accepted_status_codes
+            return HTTPResult(value={"error_code": 400, "error_message": "Bad Request. Too many vintage dates."}, status_code=400)
+
+    output = DatasetDefinition(name="fred", key_template="raw/fred/{date}.jsonl.gz", store=LocalFileOutput(path=tmp_path), format="jsonl.gz")
+    model = FREDCaptureModel(http_model=RejectingFRED(), series=["DFF"], observation_start=date(2021, 10, 11), output=output)
+
+    with pytest.raises(RuntimeError, match="DFF: Bad Request. Too many vintage dates."):
+        model(date(2026, 10, 27))

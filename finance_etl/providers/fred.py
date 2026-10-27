@@ -79,7 +79,12 @@ class FREDCaptureModel(CallableModel):
         return GenericResult
 
     def _get(self, path: str, query: dict[str, Any]) -> Any:
-        result = self.http_model(HTTPRequestContext(path=path, query={key: str(value) for key, value in query.items()}))
+        http_model = self.http_model.model_copy(update={"accepted_status_codes": [400]})
+        result = http_model(HTTPRequestContext(path=path, query={key: str(value) for key, value in query.items()}))
+        if result.status_code == 400:
+            # FRED explains a rejected request in error_message; surface it with the series.
+            message = result.value.get("error_message") if isinstance(result.value, dict) else result.value
+            raise RuntimeError(f"FRED rejected {path} for {query.get('series_id')}: {message}")
         return result.value
 
     def _metadata(self, series_id: str) -> dict[str, Any]:

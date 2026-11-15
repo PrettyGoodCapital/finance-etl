@@ -4,13 +4,10 @@ import gzip
 import json
 from datetime import date
 
-import pyarrow.parquet as pq
 import pytest
-from ccflow import Flow, GenericResult
+from ccflow import Flow
 from ccflow_etl import (
     APIKeySecretCredentials,
-    ArtifactWriteModel,
-    LocalFileOutput,
     NoOpArtifactStore,
 )
 from ccflow_http import HTTPResult
@@ -19,8 +16,6 @@ from hydra.utils import instantiate
 
 from finance_etl.providers.massive import (
     ConditionsModel,
-    DailyAggregateBackfillContext,
-    DailyAggregateBackfillModel,
     DailyAggregateContext,
     DailyAggregateModel,
     DailyMarketSummaryContext,
@@ -31,15 +26,10 @@ from finance_etl.providers.massive import (
     MarketCalendarContext,
     MarketCalendarModel,
     MarketHolidaysModel,
-    MassiveAllStocksDailySummaryModel,
     MassiveAllTickersContext,
     MassiveAllTickersModel,
     MassiveCredentials,
-    MassiveDailyAggregateExtractModel,
     MassiveDailyMarketSummaryExtractModel,
-    MassiveDailyTickerSummaryContext,
-    MassiveDailyTickerSummaryExtractModel,
-    MassiveDailyTickerSummaryModel,
     MassiveDatedReferenceContext,
     MassiveDatedReferenceExtractModel,
     MassiveDatedReferenceModel,
@@ -48,7 +38,6 @@ from finance_etl.providers.massive import (
     MassiveReferenceSnapshotContext,
     MassiveReferenceSnapshotExtractModel,
     MassiveTickerOverviewBundleExtractModel,
-    MassiveTickerOverviewExtractModel,
     TickerOverviewContext,
     TickerOverviewModel,
     TickersContext,
@@ -219,36 +208,6 @@ def test_massive_daily_ticker_summary_model_builds_open_close_request(monkeypatc
     assert request.params == {"adjusted": True, "apiKey": "secret"}
 
 
-def test_massive_daily_aggregate_extract_explain_plans_output_write(monkeypatch):
-    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
-
-    payload = MassiveDailyAggregateExtractModel(output=NoOpArtifactStore(), explain=True)(
-        DailyAggregateContext(ticker="AAPL", date="2025-01-02", adjusted=True)
-    ).value
-
-    assert payload["status"] == "planned"
-    assert payload["will_call_network"] is False
-    assert payload["request"]["url"] == "/v2/aggs/ticker/AAPL/range/1/day/2025-01-02/2025-01-02"
-    assert payload["request"]["params"] == {"adjusted": True, "sort": "asc", "limit": 50000}
-    assert payload["output_key"] == "massive/stocks/rest/daily-aggs/json/2025-01-02/AAPL.json"
-    assert payload["output_uri"] == "noop://artifact/massive/stocks/rest/daily-aggs/json/2025-01-02/AAPL.json"
-    assert payload["output_writes"][0]["status"] == "planned"
-
-
-def test_massive_ticker_overview_extract_explain_plans_output_write(monkeypatch):
-    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
-
-    payload = MassiveTickerOverviewExtractModel(output=NoOpArtifactStore(), explain=True)(
-        TickerOverviewContext(ticker="AAPL", date="2025-01-02")
-    ).value
-
-    assert payload["status"] == "planned"
-    assert payload["request"]["url"] == "/v3/reference/tickers/AAPL"
-    assert payload["request"]["params"] == {"date": "2025-01-02"}
-    assert payload["output_key"] == "massive/stocks/rest/ticker-overview/json/2025-01-02/AAPL.json"
-    assert payload["output_writes"][0]["status"] == "planned"
-
-
 def test_massive_daily_market_summary_extract_explain_plans_output_write(monkeypatch):
     monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
 
@@ -261,42 +220,13 @@ def test_massive_daily_market_summary_extract_explain_plans_output_write(monkeyp
     assert payload["output_writes"][0]["status"] == "planned"
 
 
-def test_massive_daily_ticker_summary_extract_explain_plans_output_write(monkeypatch):
-    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
-
-    payload = MassiveDailyTickerSummaryExtractModel(output=NoOpArtifactStore(), explain=True)(
-        DailyTickerSummaryContext(ticker="AAPL", date="2025-01-02")
-    ).value
-
-    assert payload["status"] == "planned"
-    assert payload["request"]["url"] == "/v1/open-close/AAPL/2025-01-02"
-    assert payload["request"]["params"] == {"adjusted": True}
-    assert payload["output_key"] == "massive/stocks/rest/daily-ticker-summary/json/2025-01-02/AAPL.json"
-    assert payload["output_writes"][0]["status"] == "planned"
-
-
 @pytest.mark.parametrize(
     ("model", "context", "partitions"),
     [
         (
-            MassiveDailyAggregateExtractModel(output=NoOpArtifactStore(), explain=True),
-            DailyAggregateContext(ticker="AAPL", date="2025-01-02"),
-            ["date", "ticker"],
-        ),
-        (
-            MassiveTickerOverviewExtractModel(output=NoOpArtifactStore(), explain=True),
-            TickerOverviewContext(ticker="AAPL", date="2025-01-02"),
-            ["date", "ticker"],
-        ),
-        (
             MassiveDailyMarketSummaryExtractModel(output=NoOpArtifactStore(), explain=True),
             DailyMarketSummaryContext(date="2025-01-02"),
             ["date"],
-        ),
-        (
-            MassiveDailyTickerSummaryExtractModel(output=NoOpArtifactStore(), explain=True),
-            DailyTickerSummaryContext(ticker="AAPL", date="2025-01-02"),
-            ["date", "ticker"],
         ),
     ],
 )
@@ -310,106 +240,6 @@ def test_massive_extract_explain_schema_includes_dataset_and_base_models(monkeyp
     assert payload["base_models"]["http"] == "ccflow_http.HTTPModel"
     assert payload["base_models"]["request_model"].startswith("finance_etl.providers.massive.")
     assert payload["base_models"]["storage"] == ["ccflow_s3.S3ArtifactStore"]
-
-
-def test_massive_ticker_overview_extract_skips_existing_output():
-    class FailingOverviewModel(TickerOverviewModel):
-        @Flow.call
-        def __call__(self, context):
-            raise AssertionError("should not call Massive when output exists")
-
-    class ExistingOutput:
-        def artifact_uri(self, key):
-            return f"s3://shared/{key}"
-
-        def exists(self, key):
-            return key == "massive/stocks/rest/ticker-overview/json/2025-01-02/AAPL.json"
-
-    payload = MassiveTickerOverviewExtractModel(overview_model=FailingOverviewModel(), output=ExistingOutput())(
-        TickerOverviewContext(ticker="AAPL", date="2025-01-02")
-    ).value
-
-    assert payload["status"] == "exists"
-    assert payload["will_call_network"] is False
-    assert payload["output_writes"][0]["status"] == "exists"
-
-
-def test_massive_daily_aggregate_extract_writes_raw_payload():
-    class FakeDailyModel(DailyAggregateModel):
-        @Flow.call
-        def __call__(self, context):
-            return HTTPResult(
-                value={"ticker": context.ticker, "results": [{"c": 42.0}]},
-                status_code=200,
-                attempts=2,
-                retry_summary={"attempts": 2, "retried": 1, "failed": 0, "succeeded": 1},
-            )
-
-    class FakeOutput:
-        def __init__(self):
-            self.writes = []
-
-        def artifact_uri(self, key):
-            return f"s3://shared/{key}"
-
-        def exists(self, key):
-            return False
-
-        def write(self, key, payload, media_type=None, metadata=None):
-            self.writes.append({"key": key, "payload": payload, "media_type": media_type, "metadata": metadata})
-            return {"status": "written", "object": key}
-
-    output = FakeOutput()
-    payload = MassiveDailyAggregateExtractModel(daily_model=FakeDailyModel(), output=output)(
-        DailyAggregateContext(ticker="AAPL", date="2025-01-02")
-    ).value
-
-    assert payload["status"] == "written"
-    assert payload["will_call_network"] is True
-    assert payload["retry_summary"] == {"attempts": 2, "retried": 1, "failed": 0, "succeeded": 1}
-    assert output.writes[0]["key"] == "massive/stocks/rest/daily-aggs/json/2025-01-02/AAPL.json"
-    assert output.writes[0]["media_type"] == "application/json"
-    assert json.loads(output.writes[0]["payload"]) == {"results": [{"c": 42.0}], "ticker": "AAPL"}
-
-
-def test_massive_ticker_overview_extract_writes_raw_payload():
-    class FakeOverviewModel(TickerOverviewModel):
-        @Flow.call
-        def __call__(self, context):
-            return HTTPResult(value={"ticker": context.ticker, "name": "Apple Inc."}, status_code=200, attempts=2)
-
-    output = RecordingArtifactOutput()
-    payload = MassiveTickerOverviewExtractModel(overview_model=FakeOverviewModel(), output=output)(
-        TickerOverviewContext(ticker="AAPL", date="2025-01-02")
-    ).value
-
-    assert payload["status"] == "written"
-    assert payload["attempts"] == 2
-    assert output.writes[0]["key"] == "massive/stocks/rest/ticker-overview/json/2025-01-02/AAPL.json"
-    assert output.writes[0]["media_type"] == "application/json"
-    assert output.writes[0]["metadata"] == {"date": "2025-01-02", "ticker": "AAPL", "provider": "massive"}
-    assert json.loads(output.writes[0]["payload"]) == {"name": "Apple Inc.", "ticker": "AAPL"}
-
-
-def test_massive_ticker_overview_extract_skips_provider_404_without_output_write():
-    class MissingOverviewModel(TickerOverviewModel):
-        @Flow.call
-        def __call__(self, context):
-            raise RuntimeError(f"HTTP GET /v3/reference/tickers/{context.ticker} failed with status 404")
-
-    output = RecordingArtifactOutput()
-    payload = MassiveTickerOverviewExtractModel(overview_model=MissingOverviewModel(), output=output)(
-        TickerOverviewContext(ticker="SCHWPJ", date="2026-07-08")
-    ).value
-
-    assert payload["status"] == "skipped"
-    assert payload["skip_reason"] == "not_found"
-    assert payload["status_code"] == 404
-    assert payload["ticker"] == "SCHWPJ"
-    assert payload["will_call_network"] is True
-    assert payload["will_publish_output"] is False
-    assert payload["output_writes"] == []
-    assert output.writes == []
 
 
 def test_massive_ticker_overview_bundle_explain_plans_one_daily_output(tmp_path):
@@ -589,64 +419,6 @@ def test_massive_daily_market_summary_extract_writes_raw_payload():
     assert json.loads(output.writes[0]["payload"]) == {"results": [{"T": "AAPL", "c": 42.0}], "status": "OK"}
 
 
-def test_massive_daily_ticker_summary_extract_writes_raw_payload():
-    class FakeTickerSummaryModel(DailyTickerSummaryModel):
-        @Flow.call
-        def __call__(self, context):
-            return HTTPResult(value={"symbol": context.ticker, "close": 42.0}, status_code=200)
-
-    output = RecordingArtifactOutput()
-    payload = MassiveDailyTickerSummaryExtractModel(summary_model=FakeTickerSummaryModel(), output=output)(
-        DailyTickerSummaryContext(ticker="AAPL", date="2025-01-02")
-    ).value
-
-    assert payload["status"] == "written"
-    assert output.writes[0]["key"] == "massive/stocks/rest/daily-ticker-summary/json/2025-01-02/AAPL.json"
-    assert output.writes[0]["media_type"] == "application/json"
-    assert output.writes[0]["metadata"] == {"date": "2025-01-02", "ticker": "AAPL", "provider": "massive"}
-    assert json.loads(output.writes[0]["payload"]) == {"close": 42.0, "symbol": "AAPL"}
-
-
-def test_massive_daily_ticker_summary_extract_skips_provider_404_without_output_write():
-    class MissingTickerSummaryModel(DailyTickerSummaryModel):
-        @Flow.call
-        def __call__(self, context):
-            raise RuntimeError(f"HTTP GET /v1/open-close/{context.ticker}/{context.date} failed with status 404")
-
-    output = RecordingArtifactOutput()
-    payload = MassiveDailyTickerSummaryExtractModel(summary_model=MissingTickerSummaryModel(), output=output)(
-        DailyTickerSummaryContext(ticker="LFAC", date="2026-07-08")
-    ).value
-
-    assert payload["status"] == "skipped"
-    assert payload["skip_reason"] == "not_found"
-    assert payload["status_code"] == 404
-    assert payload["ticker"] == "LFAC"
-    assert payload["will_call_network"] is True
-    assert payload["will_publish_output"] is False
-    assert payload["output_writes"] == []
-    assert output.writes == []
-
-
-def test_massive_daily_aggregate_backfill_builds_business_day_requests(monkeypatch):
-    monkeypatch.setenv("MASSIVE_API_KEY", "secret")
-
-    context = DailyAggregateBackfillContext(
-        ticker="AAA",
-        start_datetime="2024-01-05",
-        end_datetime="2024-01-09",
-    )
-
-    result = DailyAggregateBackfillModel().plan_requests(context)
-
-    assert [request.url for request in result.value] == [
-        "/v2/aggs/ticker/AAA/range/1/day/2024-01-05/2024-01-05",
-        "/v2/aggs/ticker/AAA/range/1/day/2024-01-08/2024-01-08",
-        "/v2/aggs/ticker/AAA/range/1/day/2024-01-09/2024-01-09",
-    ]
-    assert [request.params["apiKey"] for request in result.value] == ["secret", "secret", "secret"]
-
-
 def test_massive_market_calendar_uses_provider_closed_holidays():
     context = MarketCalendarContext(
         start_date="2024-01-01",
@@ -705,43 +477,6 @@ def test_massive_market_calendar_filters_unknown_exchange_metadata():
     result = MarketCalendarModel()(context)
 
     assert result.value == []
-
-
-def test_massive_daily_aggregate_backfill_can_use_market_calendar_session_dates(monkeypatch):
-    monkeypatch.setenv("MASSIVE_API_KEY", "secret")
-
-    context = DailyAggregateBackfillContext(
-        ticker="AAA",
-        start_datetime="2024-01-05",
-        end_datetime="2024-01-09",
-        session_dates=[date(2024, 1, 5), date(2024, 1, 9)],
-    )
-
-    result = DailyAggregateBackfillModel().plan_requests(context)
-
-    assert [request.url for request in result.value] == [
-        "/v2/aggs/ticker/AAA/range/1/day/2024-01-05/2024-01-05",
-        "/v2/aggs/ticker/AAA/range/1/day/2024-01-09/2024-01-09",
-    ]
-
-
-def test_massive_stock_data_plan_builds_symbol_date_requests(monkeypatch):
-    from finance_etl.providers.massive import StockDataPlanContext, StockDataPlanModel
-
-    monkeypatch.setenv("MASSIVE_API_KEY", "secret")
-
-    context = StockDataPlanContext(session_date=date(2024, 1, 3), symbols=["AAA", "BBB"])
-
-    result = StockDataPlanModel().plan_requests(context)
-
-    assert [request.url for request in result.value] == [
-        "/v2/aggs/ticker/AAA/range/1/day/2024-01-03/2024-01-03",
-        "/v2/aggs/ticker/BBB/range/1/day/2024-01-03/2024-01-03",
-    ]
-    assert [request.params for request in result.value] == [
-        {"adjusted": True, "sort": "asc", "limit": 50000, "apiKey": "secret"},
-        {"adjusted": True, "sort": "asc", "limit": 50000, "apiKey": "secret"},
-    ]
 
 
 def test_massive_ticker_universe_plan_builds_date_specific_requests(monkeypatch):
@@ -805,62 +540,6 @@ def test_massive_dated_symbol_universe_fetches_normalized_symbols():
     assert calls[0][0].active_date == date(2025, 1, 2)
     assert calls[0][0].exchange == "XNYS"
     assert calls[0][1] == 7
-
-
-def test_massive_daily_ticker_summary_explain_includes_metadata_and_requests(monkeypatch):
-    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
-
-    payload = MassiveDailyTickerSummaryModel(tickers=["AAPL"], calendar="/calendars/exchange/NYSE", explain=True)(["2025-01-02"]).value
-
-    assert payload["dataset"] == "massive-daily-ticker-summary"
-    assert payload["provider"] == "massive"
-    assert payload["will_call_network"] is False
-    assert payload["dataset_metadata"]["partition_keys"] == ["date", "ticker"]
-    assert payload["provider_metadata"]["retry"]["retry_status_codes"] == [429, 500, 502, 503, 504]
-    assert payload["base_models"]["http"] == "ccflow_http.HTTPModel"
-    assert "ccflow_s3.S3CacheStore" in payload["base_models"]["storage"]
-    assert [request["url"] for request in payload["requests"]] == ["/v2/aggs/ticker/AAPL/range/1/day/2025-01-02/2025-01-02"]
-    assert payload["output_keys"] == ["massive/stocks/rest/ticker-summary/json/2025-01-02/AAPL.json"]
-
-
-def test_massive_daily_ticker_summary_explain_plans_output_writes(monkeypatch):
-    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
-
-    payload = MassiveDailyTickerSummaryModel(
-        tickers=["AAPL"],
-        explain=True,
-        artifact_writer=ArtifactWriteModel(store=NoOpArtifactStore()),
-    )(["2025-01-02"]).value
-
-    assert payload["output_writes"][0]["status"] == "planned"
-    assert payload["output_writes"][0]["artifact"]["uri"] == "noop://artifact/massive/stocks/rest/ticker-summary/json/2025-01-02/AAPL.json"
-
-
-def test_massive_daily_ticker_summary_can_plan_parquet_return_type(monkeypatch):
-    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
-
-    payload = MassiveDailyTickerSummaryModel(tickers=["AAPL"], explain=True, return_type="parquet")(["2025-01-02"]).value
-
-    assert payload["return_type"] == "parquet"
-    assert payload["output_keys"] == ["massive/stocks/rest/ticker-summary/parquet/2025-01-02/AAPL.parquet"]
-
-
-def test_massive_daily_ticker_summary_artifact_writer_materializes_parquet_return_type(tmp_path):
-    model = MassiveDailyTickerSummaryModel(
-        tickers=["AAPL"],
-        return_type="parquet",
-        artifact_writer=ArtifactWriteModel(store=LocalFileOutput(path=tmp_path)),
-    )
-
-    results = model._write_outputs(
-        MassiveDailyTickerSummaryContext(date="2025-01-02"),
-        [{"ticker": "AAPL", "close": 42}],
-    )
-
-    output_path = tmp_path / "massive" / "stocks" / "rest" / "ticker-summary" / "parquet" / "2025-01-02" / "AAPL.parquet"
-
-    assert results[0].status == "written"
-    assert pq.read_table(output_path).to_pylist() == [{"ticker": "AAPL", "close": 42}]
 
 
 def test_massive_flat_file_transfer_explain_plans_stock_source_and_output():
@@ -1048,45 +727,6 @@ def test_massive_all_tickers_skips_http_when_output_exists():
     assert payload["output_writes"][0]["artifact"]["uri"] == "s3://shared/massive/stocks/rest/all-tickers/2025-01-02.json"
 
 
-def test_massive_all_stocks_daily_summary_explain_plans_ticker_universe_request(monkeypatch):
-    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
-
-    payload = MassiveAllStocksDailySummaryModel(explain=True)(["2025-01-02"]).value
-
-    assert payload["dataset"] == "massive-all-stocks-daily-ticker-summary"
-    assert payload["status"] == "planned"
-    assert payload["ticker_universe_request"]["url"] == "/v3/reference/tickers"
-    assert payload["ticker_universe_request"]["params"] == {"market": "stocks", "active": True, "limit": 1000, "date": "2025-01-02"}
-    assert payload["summary_dataset_metadata"]["name"] == "massive-daily-ticker-summary"
-
-
-def test_massive_all_stocks_daily_summary_composes_ticker_and_daily_models(monkeypatch):
-    class FakeTickersModel:
-        def build_request(self, context):
-            return TickersModel().build_request(context)
-
-        def __call__(self, context):
-            return GenericResult(value={"results": [{"ticker": "AAA"}, {"ticker": "BBB"}]})
-
-    class FakeDailyModel(DailyAggregateModel):
-        @Flow.call
-        def __call__(self, context):
-            return {"value": {"ticker": context.ticker, "date": context.date.isoformat()}, "status_code": 200}
-
-    monkeypatch.setenv("MASSIVE_API_KEY", "secret")
-    model = MassiveAllStocksDailySummaryModel(
-        tickers_model=FakeTickersModel(),
-        summary_model=MassiveDailyTickerSummaryModel(daily_model=FakeDailyModel()),
-        max_tickers=1,
-    )
-
-    payload = model(["2025-01-02"]).value
-
-    assert payload["ticker_count"] == 1
-    assert payload["tickers"] == ["AAA"]
-    assert payload["summary"]["results"][0]["value"] == {"ticker": "AAA", "date": "2025-01-02"}
-
-
 def test_massive_tickers_model_paginates_next_url(monkeypatch):
     calls = []
 
@@ -1257,60 +897,6 @@ def test_massive_reference_snapshot_plans_one_market_wide_capture(reference_mode
     assert "ticker" not in payload["request"]["params"]
     assert payload["output_key"] == f"massive/stocks/rest/{reference_name}/json/2025/01/2025-01-02.json"
     assert payload["dataset_metadata"]["partition_keys"] == ["capture_date"]
-
-
-def test_massive_daily_aggregate_backfill_downloads_each_business_day(monkeypatch):
-    calls = []
-
-    class FakeResponse:
-        status_code = 200
-
-        def __init__(self, url):
-            self.headers = {}
-            self.url = f"https://api.massive.com{url}"
-            self._url = url
-
-        def json(self):
-            date = self._url.rsplit("/", 1)[-1]
-            return {"ticker": "AAA", "date": date}
-
-        def raise_for_status(self):
-            return None
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, traceback):
-            return False
-
-        def request(self, **kwargs):
-            calls.append(kwargs)
-            return FakeResponse(kwargs["url"])
-
-    monkeypatch.setattr("ccflow_http.base.httpx2.Client", FakeClient)
-
-    context = DailyAggregateBackfillContext(
-        ticker="AAA",
-        start_datetime="2024-01-05",
-        end_datetime="2024-01-09",
-    )
-
-    result = DailyAggregateBackfillModel()(context)
-
-    assert [call["url"] for call in calls] == [
-        "/v2/aggs/ticker/AAA/range/1/day/2024-01-05/2024-01-05",
-        "/v2/aggs/ticker/AAA/range/1/day/2024-01-08/2024-01-08",
-        "/v2/aggs/ticker/AAA/range/1/day/2024-01-09/2024-01-09",
-    ]
-    assert [response.value for response in result.value] == [
-        {"ticker": "AAA", "date": "2024-01-05"},
-        {"ticker": "AAA", "date": "2024-01-08"},
-        {"ticker": "AAA", "date": "2024-01-09"},
-    ]
 
 
 def test_massive_flat_file_transfer_plans_dataset_keys_and_skips_dates_before_it():

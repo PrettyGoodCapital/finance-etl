@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList, ModelRegistry
+from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList
 from ccflow_etl import (
     APITokenCredentials,
     ArtifactReadContext,
@@ -18,6 +18,8 @@ from ccflow_etl import (
     DatasetDefinition,
     ETLArtifact,
     PayloadCodec,
+    artifact_uri,
+    resolve_model,
 )
 from ccflow_http import HTTPModel, HTTPRequest, HTTPRequestContext, safe_request_dump
 from pydantic import Field, field_validator, model_validator
@@ -705,15 +707,6 @@ class MassiveAllTickersModel(DatasetOutputMixin, CallableModel):
     def output_key(self, context: MassiveAllTickersContext) -> str:
         return f"{self.output_key_prefix.strip('/')}/{self._date_value(context)}.json"
 
-    def _artifact_uri(self, key: str) -> str:
-        if self._store is None:
-            return key
-        if hasattr(self._store, "artifact_uri"):
-            return self._store.artifact_uri(key)
-        if hasattr(self._store, "uri"):
-            return self._store.uri(key)
-        return key
-
     def dataset_metadata(self) -> dict[str, Any]:
         return {
             "name": self._name,
@@ -777,7 +770,7 @@ class MassiveAllTickersModel(DatasetOutputMixin, CallableModel):
             key=self._key(context),
             stage="extract",
             dataset=self._name,
-            uri=self._artifact_uri(self._key(context)),
+            uri=artifact_uri(self._store, self._key(context)),
             media_type=PayloadCodec(format="json").media_type,
             status="exists",
             metadata={"date": self._date_value(context), "provider": self.provider_name, "market": self.market},
@@ -825,7 +818,7 @@ class MassiveAllTickersModel(DatasetOutputMixin, CallableModel):
             "calendar": self.calendar,
             "return_type": "json",
             "output_key": output_key,
-            "output_uri": self._artifact_uri(output_key) if self._store is not None else None,
+            "output_uri": artifact_uri(self._store, output_key) if self._store is not None else None,
             "output_writes": self._planned_write(context),
             "required_env": ["MASSIVE_API_KEY"],
             "will_call_network": False,
@@ -1037,7 +1030,7 @@ class _MassiveRESTExtractModel(DatasetOutputMixin, CallableModel):
             **self._plan_fields(context),
             "return_type": self.return_type,
             "output_key": output_key,
-            "output_uri": _artifact_uri(self._store, output_key) if self._store is not None else None,
+            "output_uri": artifact_uri(self._store, output_key) if self._store is not None else None,
             "output_writes": self._planned_write(context),
             "required_env": ["MASSIVE_API_KEY"],
             "will_call_network": False,
@@ -1244,16 +1237,6 @@ def _date_value(value: Any) -> str:
     return value.isoformat() if isinstance(value, date) else str(value)
 
 
-def _artifact_uri(output: Any, key: str) -> str:
-    if output is None:
-        return key
-    if hasattr(output, "artifact_uri"):
-        return output.artifact_uri(key)
-    if hasattr(output, "uri"):
-        return output.uri(key)
-    return key
-
-
 def _artifact_write(
     *,
     output: Any,
@@ -1286,7 +1269,7 @@ def _existing_artifact(*, output: Any, key: str, return_type: CacheFormatName, d
         key=key,
         stage="extract",
         dataset=dataset_name,
-        uri=_artifact_uri(output, key),
+        uri=artifact_uri(output, key),
         media_type=PayloadCodec(format=return_type).media_type,
         status="exists",
         metadata=metadata,
@@ -1427,15 +1410,12 @@ class MassiveTickerOverviewBundleExtractModel(DatasetOutputMixin, CallableModel)
             "compression": "gzip",
         }
 
-    def _artifact_uri(self, key: str) -> str:
-        return _artifact_uri(self._store, key)
-
     def _output_write_record(self, key: str, status: str, metadata: dict[str, Any]) -> dict[str, Any]:
         artifact = ETLArtifact(
             key=key,
             stage="extract",
             dataset=self._name,
-            uri=self._artifact_uri(key),
+            uri=artifact_uri(self._store, key),
             media_type=self.media_type,
             status=status,
             metadata=metadata,
@@ -1576,7 +1556,7 @@ class MassiveTickerOverviewBundleExtractModel(DatasetOutputMixin, CallableModel)
             "provider": "massive",
             "date": _date_value(context.date),
             "output_key": key,
-            "output_uri": self._artifact_uri(key),
+            "output_uri": artifact_uri(self._store, key),
             "staging_path": str(self.partial_path(context)),
             "max_concurrency": self.max_concurrency,
             "max_symbols": self.max_symbols,
@@ -1766,7 +1746,7 @@ class MassiveTickerEventsExtractModel(DatasetOutputMixin, CallableModel):
         return self.snapshot.key(value) if self.snapshot is not None else self.snapshot_key_template.format(date=value.isoformat())
 
     def previous_session(self, value: date) -> date | None:
-        calendar = ModelRegistry.root()[self.calendar] if isinstance(self.calendar, str) else self.calendar
+        calendar = resolve_model(self.calendar)
         start, end = value - timedelta(days=14), value - timedelta(days=1)
         if hasattr(calendar, "business_days"):
             sessions = list(calendar.business_days(start, end))
@@ -1776,7 +1756,7 @@ class MassiveTickerEventsExtractModel(DatasetOutputMixin, CallableModel):
 
     def _snapshot_store(self) -> Any:
         if self.snapshot is not None:
-            return ModelRegistry.root()[self.snapshot.store] if isinstance(self.snapshot.store, str) else self.snapshot.store
+            return self.snapshot.resolved_store()
         return self.snapshot_store if self.snapshot_store is not None else self._store
 
     def _will_fetch(self, context: MassiveAllTickersContext) -> bool:
@@ -1821,7 +1801,7 @@ class MassiveTickerEventsExtractModel(DatasetOutputMixin, CallableModel):
             stage="extract",
             status=status,
             dataset=self._name,
-            uri=_artifact_uri(self._store, key),
+            uri=artifact_uri(self._store, key),
             media_type=self.media_type,
             metadata=metadata,
         ).model_dump(mode="json")
@@ -1835,7 +1815,7 @@ class MassiveTickerEventsExtractModel(DatasetOutputMixin, CallableModel):
             "date": _date_value(context.date),
             "previous_date": _date_value(previous) if previous else None,
             "output_key": key,
-            "output_uri": _artifact_uri(self._store, key),
+            "output_uri": artifact_uri(self._store, key),
             "snapshot_keys": [self.snapshot_key(value) for value in (previous, context.date) if value is not None],
         }
         if self._before_first_date(context):
@@ -2240,22 +2220,13 @@ class MassiveFlatFileTransferModel(DatasetOutputMixin, CallableModel):
         year, month, date_value = self._date_parts(context)
         return self.local_dir / self.flat_file / year / month / f"{date_value}.csv.gz"
 
-    def _artifact_uri(self, key: str) -> str:
-        if self._store is None:
-            return key
-        if hasattr(self._store, "artifact_uri"):
-            return self._store.artifact_uri(key)
-        if hasattr(self._store, "uri"):
-            return self._store.uri(key)
-        return key
-
     def _output_write_record(self, key: str, status: str, metadata: dict | None = None) -> dict:
         metadata = metadata or {}
         artifact = ETLArtifact(
             key=key,
             stage="extract",
             dataset=self._name,
-            uri=self._artifact_uri(key),
+            uri=artifact_uri(self._store, key),
             media_type=self.media_type,
             status=status,
             metadata=metadata,
@@ -2322,7 +2293,7 @@ class MassiveFlatFileTransferModel(DatasetOutputMixin, CallableModel):
             "source_key": source_key,
             "source_uri": f"s3://{self.source_bucket}/{source_key}",
             "output_key": output_key,
-            "output_uri": self._artifact_uri(output_key) if self._store is not None else None,
+            "output_uri": artifact_uri(self._store, output_key) if self._store is not None else None,
             "local_path": str(self.local_path(context)),
             "will_download": False,
             "will_publish_output": False,

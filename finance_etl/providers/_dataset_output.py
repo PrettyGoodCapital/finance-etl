@@ -1,7 +1,6 @@
 from datetime import date
 from typing import Any
 
-from ccflow import ModelRegistry
 from ccflow_etl import DatasetDefinition
 from pydantic import BaseModel, Field
 
@@ -24,7 +23,7 @@ class DatasetOutputMixin(BaseModel):
     def _store(self) -> Any:
         if self.dataset is None:
             return getattr(self, "output", None)
-        return ModelRegistry.root()[self.dataset.store] if isinstance(self.dataset.store, str) else self.dataset.store
+        return self.dataset.resolved_store()
 
     @property
     def _name(self) -> str:

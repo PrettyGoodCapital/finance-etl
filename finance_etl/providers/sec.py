@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from ccflow import CallableModel, DateContext, Flow, GenericResult, GraphDepList, ModelRegistry
+from ccflow import CallableModel, DateContext, Flow, GenericResult, GraphDepList
 from ccflow_etl import (
     ArtifactReadContext,
     ArtifactReadModel,
@@ -13,6 +13,7 @@ from ccflow_etl import (
     DatasetDefinition,
     ETLArtifact,
     ExecutionPolicy,
+    artifact_uri,
 )
 from ccflow_http import HTTPModel, HTTPRequest, HTTPRequestContext
 from ccflow_http.base import ResponseFormat
@@ -96,17 +97,9 @@ def parse_master_index(text: str) -> list[dict[str, str]]:
     return rows
 
 
-def _artifact_uri(store: Any, key: str) -> str:
-    if hasattr(store, "artifact_uri"):
-        return store.artifact_uri(key)
-    if hasattr(store, "uri"):
-        return store.uri(key)
-    return key
-
-
 def _existing_artifact(store: Any, key: str, dataset: str, media_type: str, metadata: dict[str, Any]) -> dict[str, Any]:
     return ETLArtifact(
-        key=key, stage="extract", status="exists", dataset=dataset, uri=_artifact_uri(store, key), media_type=media_type, metadata=metadata
+        key=key, stage="extract", status="exists", dataset=dataset, uri=artifact_uri(store, key), media_type=media_type, metadata=metadata
     ).model_dump(mode="json")
 
 
@@ -137,7 +130,7 @@ class SECDailyIndexExtractModel(DatasetOutputMixin, CallableModel):
     def __call__(self, context: SECDateContext) -> GenericResult:
         key = self._key(context)
         metadata = {"date": context.date.isoformat(), "provider": "sec", "dataset": self._name}
-        plan = {"dataset": self._name, "date": context.date.isoformat(), "output_key": key, "output_uri": _artifact_uri(self._store, key)}
+        plan = {"dataset": self._name, "date": context.date.isoformat(), "output_key": key, "output_uri": artifact_uri(self._store, key)}
         if self._before_first_date(context):
             return GenericResult(value={**plan, "status": "before_first_date", "output_writes": []})
         if self.explain:
@@ -268,7 +261,7 @@ class SECFilerRefreshBundleModel(DatasetOutputMixin, CallableModel):
             "dataset": self._name,
             "date": context.date.isoformat(),
             "output_key": key,
-            "output_uri": _artifact_uri(self._store, key),
+            "output_uri": artifact_uri(self._store, key),
             "form_types": self.form_types,
         }
         if self._before_first_date(context):
@@ -310,7 +303,7 @@ class SECFilerRefreshBundleModel(DatasetOutputMixin, CallableModel):
             stage="extract",
             status=status,
             dataset=self._name,
-            uri=_artifact_uri(self._store, key),
+            uri=artifact_uri(self._store, key),
             media_type=self.media_type,
             metadata=metadata,
         )
@@ -340,10 +333,6 @@ def company_name_windows(submissions: dict[str, Any]) -> list[dict[str, Any]]:
     if submissions.get("name"):
         windows.append({**common, "name": submissions["name"], "valid_from": last_to + timedelta(days=1) if last_to else None, "valid_to": None})
     return windows
-
-
-def _resolve(store: Any) -> Any:
-    return ModelRegistry.root()[store] if isinstance(store, str) else store
 
 
 class SECCompanyNamesModel(CallableModel):
@@ -381,7 +370,7 @@ class SECCompanyNamesModel(CallableModel):
 
         path = self.workspace / f"submissions-{value.isoformat()}.zip"
         path.parent.mkdir(parents=True, exist_ok=True)
-        store, key = _resolve(self.submissions.store), self.submissions.key(value)
+        store, key = self.submissions.resolved_store(), self.submissions.key(value)
         try:
             if hasattr(store, "read_file"):
                 store.read_file(key, path)

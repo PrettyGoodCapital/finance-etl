@@ -3,7 +3,7 @@ from datetime import date
 from typing import Any
 
 from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList
-from ccflow_etl import ArtifactReadContext, ArtifactReadModel
+from ccflow_etl import ArtifactReadContext, ArtifactReadModel, artifact_uri
 from pydantic import BaseModel, Field, model_validator
 
 __all__ = (
@@ -86,13 +86,6 @@ class ArtifactSymbolUniverseModel(CallableModel):
     def artifact_key(self, context: DateContext) -> str:
         return self.key_template.format(date=context.date.isoformat())
 
-    def _artifact_uri(self, key: str) -> str:
-        if hasattr(self.store, "artifact_uri"):
-            return self.store.artifact_uri(key)
-        if hasattr(self.store, "uri"):
-            return self.store.uri(key)
-        return key
-
     def _payload(self, key: str) -> Any:
         result = ArtifactReadModel(store=self.store)(ArtifactReadContext(key=key))
         return json.loads(result.payload)
@@ -138,7 +131,7 @@ class ArtifactSymbolUniverseModel(CallableModel):
                 as_of_date=context.date,
                 symbols=symbols,
                 source=self.source,
-                snapshot_uri=self._artifact_uri(key),
+                snapshot_uri=artifact_uri(self.store, key),
                 metadata={
                     **self.metadata,
                     "key": key,

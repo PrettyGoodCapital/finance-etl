@@ -4,7 +4,7 @@ import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList, ModelRegistry
+from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList
 from ccflow_etl import (
     APITokenCredentials,
     ArtifactReadContext,
@@ -14,6 +14,7 @@ from ccflow_etl import (
     DatasetDefinition,
     ETLArtifact,
     ExecutionPolicy,
+    artifact_uri,
 )
 from ccflow_http import HTTPModel, HTTPRequest, HTTPRequestContext, HTTPRetryPolicy, RedactionPolicy
 from ccflow_http.base import HTTPContext, HTTPMethod
@@ -121,16 +122,8 @@ class OpenFIGIMappingCaptureModel(DatasetOutputMixin, CallableModel):
 
     def _snapshot_store(self) -> Any:
         if self.snapshot is not None:
-            return ModelRegistry.root()[self.snapshot.store] if isinstance(self.snapshot.store, str) else self.snapshot.store
+            return self.snapshot.resolved_store()
         return self.snapshot_store if self.snapshot_store is not None else self._store
-
-    def _artifact_uri(self, key: str) -> str:
-        store = self._store
-        if hasattr(store, "artifact_uri"):
-            return store.artifact_uri(key)
-        if hasattr(store, "uri"):
-            return store.uri(key)
-        return key
 
     def _will_fetch(self, context: DateContext) -> bool:
         if self.explain or self._store is None or self._before_first_date(context):
@@ -191,7 +184,7 @@ class OpenFIGIMappingCaptureModel(DatasetOutputMixin, CallableModel):
             "date": context.date.isoformat(),
             "snapshot_key": self.snapshot_key(context.date),
             "output_key": key,
-            "output_uri": self._artifact_uri(key),
+            "output_uri": artifact_uri(self._store, key),
         }
         if self._before_first_date(context):
             return GenericResult(value={**plan, "status": "before_first_date", "output_writes": []})

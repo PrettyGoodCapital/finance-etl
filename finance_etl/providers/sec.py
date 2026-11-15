@@ -71,7 +71,7 @@ class SECDailyIndexModel(SECHTTPModel):
     def context_type(self) -> type[SECDailyIndexContext]:
         return SECDailyIndexContext
 
-    def build_request(self, context: SECDailyIndexContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
+    def build_request(self, context: SECDailyIndexContext) -> HTTPRequest:  # ty: ignore[incompatible-method-override]
         value = context.date
         values = {"year": f"{value.year:04d}", "quarter": (value.month - 1) // 3 + 1, "ymd": value.strftime("%Y%m%d")}
         return super().build_request(context.model_copy(update={"template_values": {**context.template_values, **values}}))

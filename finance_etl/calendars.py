@@ -134,7 +134,7 @@ class FinanceDatesCalendar(BaseCalendar):
     code: str
 
     @classmethod
-    def __class_getitem__(cls, code: str):  # ty: ignore[invalid-method-override]
+    def __class_getitem__(cls, code: str):  # ty: ignore[incompatible-method-override]
         return cls(code=_normalize_code(str(code)))
 
     def calendar(self):

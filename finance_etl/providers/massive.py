@@ -288,7 +288,7 @@ class MassiveHTTPModel(HTTPModel):
         context_credentials = context.credentials.api_key() if context.credentials else None
         return context.api_key or context_credentials or self.api_key or self.credentials.api_key() or os.environ.get(self.api_key_env)
 
-    def build_request(self, context: MassiveRequestContext | None = None) -> HTTPRequest:  # ty: ignore[invalid-method-override]
+    def build_request(self, context: MassiveRequestContext | None = None) -> HTTPRequest:  # ty: ignore[incompatible-method-override]
         context = context or MassiveRequestContext()
         api_key = self._api_key(context)
         if api_key:
@@ -430,7 +430,7 @@ class TickersModel(MassiveHTTPModel):
     paginate: bool = True
     max_pages: int = 1000
 
-    def build_request(self, context: TickersContext | None = None) -> HTTPRequest:  # ty: ignore[invalid-method-override]
+    def build_request(self, context: TickersContext | None = None) -> HTTPRequest:  # ty: ignore[incompatible-method-override]
         context = context or TickersContext()
         query = {
             **context.query,
@@ -465,7 +465,7 @@ class MassiveDatedReferenceModel(MassiveHTTPModel):
     def context_type(self) -> type[MassiveDatedReferenceContext]:
         return MassiveDatedReferenceContext
 
-    def build_request(self, context: MassiveDatedReferenceContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
+    def build_request(self, context: MassiveDatedReferenceContext) -> HTTPRequest:  # ty: ignore[incompatible-method-override]
         query = {**context.query, self.date_field: _date_value(context.date), "limit": self.limit}
         if self.sort is not None:
             query["sort"] = self.sort
@@ -747,7 +747,7 @@ class DailyAggregateModel(MassiveHTTPModel):
     def context_type(self) -> type[DailyAggregateContext]:
         return DailyAggregateContext
 
-    def build_request(self, context: DailyAggregateContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
+    def build_request(self, context: DailyAggregateContext) -> HTTPRequest:  # ty: ignore[incompatible-method-override]
         context = context.model_copy(update={"query": {**context.query, "adjusted": context.adjusted}})
         return super().build_request(context)
 
@@ -881,7 +881,7 @@ class TickerOverviewModel(MassiveHTTPModel):
     def context_type(self) -> type[TickerOverviewContext]:
         return TickerOverviewContext
 
-    def build_request(self, context: TickerOverviewContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
+    def build_request(self, context: TickerOverviewContext) -> HTTPRequest:  # ty: ignore[incompatible-method-override]
         query = {**context.query, "date": _date_value(context.date)}
         return super().build_request(context.model_copy(update={"query": query}))
 
@@ -893,7 +893,7 @@ class DailyMarketSummaryModel(MassiveHTTPModel):
     def context_type(self) -> type[DailyMarketSummaryContext]:
         return DailyMarketSummaryContext
 
-    def build_request(self, context: DailyMarketSummaryContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
+    def build_request(self, context: DailyMarketSummaryContext) -> HTTPRequest:  # ty: ignore[incompatible-method-override]
         query = {**context.query, "adjusted": context.adjusted, "include_otc": context.include_otc}
         return super().build_request(context.model_copy(update={"query": query}))
 
@@ -905,7 +905,7 @@ class DailyTickerSummaryModel(MassiveHTTPModel):
     def context_type(self) -> type[DailyTickerSummaryContext]:
         return DailyTickerSummaryContext
 
-    def build_request(self, context: DailyTickerSummaryContext) -> HTTPRequest:  # ty: ignore[invalid-method-override]
+    def build_request(self, context: DailyTickerSummaryContext) -> HTTPRequest:  # ty: ignore[incompatible-method-override]
         query = {**context.query, "adjusted": context.adjusted}
         return super().build_request(context.model_copy(update={"query": query}))
 

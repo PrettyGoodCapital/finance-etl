@@ -6,20 +6,14 @@ from typing import Any
 
 from ccflow import CallableModel, DateContext, Flow, GenericResult, GraphDepList
 from ccflow_etl import (
-    ArtifactReadContext,
-    ArtifactReadModel,
-    ArtifactWriteContext,
-    ArtifactWriteModel,
     DatasetDefinition,
-    ETLArtifact,
     ExecutionPolicy,
-    artifact_uri,
 )
 from ccflow_http import HTTPModel, HTTPRequest, HTTPRequestContext
 from ccflow_http.base import ResponseFormat
 from pydantic import Field, model_validator
 
-from finance_etl.providers._dataset_output import DatasetOutputMixin
+from finance_etl.providers._dataset_output import before_first_date
 
 __all__ = (
     "SECCompanyNamesModel",
@@ -97,22 +91,13 @@ def parse_master_index(text: str) -> list[dict[str, str]]:
     return rows
 
 
-def _existing_artifact(store: Any, key: str, dataset: str, media_type: str, metadata: dict[str, Any]) -> dict[str, Any]:
-    return ETLArtifact(
-        key=key, stage="extract", status="exists", dataset=dataset, uri=artifact_uri(store, key), media_type=media_type, metadata=metadata
-    ).model_dump(mode="json")
-
-
-class SECDailyIndexExtractModel(DatasetOutputMixin, CallableModel):
-    """Store the EDGAR master daily index for a date under a dated key."""
+class SECDailyIndexExtractModel(CallableModel):
+    """Store the EDGAR master daily index for a date as that date's partition of ``dataset``."""
 
     index_model: SECDailyIndexModel
-    output: Any = None
-    output_key_prefix: str = "sec/edgar/daily-index"
-    dataset_name: str = "sec-edgar-daily-index"
+    dataset: DatasetDefinition = Field(description="Date-partitioned dataset the daily index files are written to.")
     overwrite_output: bool = False
     explain: bool = False
-    media_type: str = "text/plain"
 
     @property
     def context_type(self) -> type[SECDateContext]:
@@ -122,48 +107,25 @@ class SECDailyIndexExtractModel(DatasetOutputMixin, CallableModel):
     def result_type(self) -> type[GenericResult]:
         return GenericResult
 
-    def output_key(self, context: SECDateContext) -> str:
-        value = context.date
-        return f"{self.output_key_prefix.strip('/')}/{value:%Y}/{value:%m}/{value.isoformat()}.idx"
-
     @Flow.call
     def __call__(self, context: SECDateContext) -> GenericResult:
-        key = self._key(context)
-        metadata = {"date": context.date.isoformat(), "provider": "sec", "dataset": self._name}
-        plan = {"dataset": self._name, "date": context.date.isoformat(), "output_key": key, "output_uri": artifact_uri(self._store, key)}
-        if self._before_first_date(context):
-            return GenericResult(value={**plan, "status": "before_first_date", "output_writes": []})
+        plan = self.dataset.plan(context.date)
+        if before_first_date(self.dataset, context.date):
+            return GenericResult(value={**plan, "status": "before_first_date"})
         if self.explain:
             return GenericResult(value={**plan, "status": "planned", "will_call_network": False})
-        if self._store is None:
-            raise ValueError("SEC daily index extract requires output.")
-        if not self.overwrite_output and hasattr(self._store, "exists") and self._store.exists(key):
-            return GenericResult(
-                value={
-                    **plan,
-                    "status": "exists",
-                    "output_writes": [_existing_artifact(self._store, key, self._name, self.media_type, metadata)],
-                }
-            )
+        if not self.overwrite_output and self.dataset.exists(context.date):
+            return GenericResult(value={**plan, "status": "exists"})
         result = self.index_model(SECDailyIndexContext(date=context.date))
         if result.status_code == 404:
-            return GenericResult(value={**plan, "status": "not_published", "status_code": 404, "output_writes": []})
+            return GenericResult(value={**plan, "status": "not_published", "status_code": 404})
         rows = parse_master_index(result.value)
-        write = ArtifactWriteModel(store=self._store)(
-            ArtifactWriteContext(
-                key=key,
-                payload=result.value.encode(),
-                media_type=self.media_type,
-                dataset=self._name,
-                stage="extract",
-                overwrite=self.overwrite_output,
-                metadata={**metadata, "filing_count": len(rows)},
-            )
-        )
-        return GenericResult(value={**plan, "status": write.status, "filing_count": len(rows), "output_writes": [write.model_dump(mode="json")]})
+        metadata = {"provider": "sec", "filing_count": len(rows)}
+        writes = self.dataset.write_bytes(context.date, result.value.encode(), metadata=metadata, overwrite=self.overwrite_output)
+        return GenericResult(value={**plan, "status": writes[-1]["status"], "filing_count": len(rows), "output_writes": writes})
 
 
-class SECFilerRefreshBundleModel(DatasetOutputMixin, CallableModel):
+class SECFilerRefreshBundleModel(CallableModel):
     """Fetch current company facts and submissions for every company that filed financial forms on a date.
 
     Filers come from that date's stored daily index, which is declared as a graph dependency. Records are staged to
@@ -173,15 +135,12 @@ class SECFilerRefreshBundleModel(DatasetOutputMixin, CallableModel):
     index_extract: SECDailyIndexExtractModel
     facts_model: SECHTTPModel
     submissions_model: SECHTTPModel
-    output: Any = None
+    dataset: DatasetDefinition = Field(description="Date-partitioned dataset each date's compressed JSONL bundle is written to.")
     staging_directory: Path = Path("/tmp/finance-etl/sec-filer-refresh")
-    output_key_prefix: str = "sec/edgar/filer-refresh"
-    dataset_name: str = "sec-edgar-filer-refresh"
     form_types: list[str] = Field(default_factory=lambda: list(DEFAULT_FINANCIAL_FORMS))
     max_filers: int | None = Field(default=None, ge=1)
     overwrite_output: bool = False
     explain: bool = False
-    media_type: str = "application/gzip"
 
     @property
     def context_type(self) -> type[SECDateContext]:
@@ -191,13 +150,10 @@ class SECFilerRefreshBundleModel(DatasetOutputMixin, CallableModel):
     def result_type(self) -> type[GenericResult]:
         return GenericResult
 
-    def output_key(self, context: SECDateContext) -> str:
-        return f"{self.output_key_prefix.strip('/')}/jsonl/{context.date.isoformat()}.jsonl.gz"
-
     def _will_fetch(self, context: SECDateContext) -> bool:
-        if self.explain or self._store is None or self._before_first_date(context):
+        if self.explain or before_first_date(self.dataset, context.date):
             return False
-        return self.overwrite_output or not (hasattr(self._store, "exists") and self._store.exists(self._key(context)))
+        return self.overwrite_output or not self.dataset.exists(context.date)
 
     @Flow.deps
     def __deps__(self, context: SECDateContext) -> GraphDepList:
@@ -205,10 +161,10 @@ class SECFilerRefreshBundleModel(DatasetOutputMixin, CallableModel):
 
     def _filers(self, context: SECDateContext) -> list[dict[str, Any]]:
         self.index_extract(context)
-        key = self.index_extract._key(context)
-        if not self.index_extract._store.exists(key):
+        index = self.index_extract.dataset
+        if not index.exists(context.date):
             return []
-        text = ArtifactReadModel(store=self.index_extract._store)(ArtifactReadContext(key=key)).payload.decode()
+        text = index.read_bytes(context.date).decode()
         wanted = set(self.form_types)
         filers: dict[str, dict[str, Any]] = {}
         for row in parse_master_index(text):
@@ -255,29 +211,13 @@ class SECFilerRefreshBundleModel(DatasetOutputMixin, CallableModel):
 
     @Flow.call
     def __call__(self, context: SECDateContext) -> GenericResult:
-        key = self._key(context)
-        metadata = {"date": context.date.isoformat(), "provider": "sec", "dataset": self._name, "format": "jsonl", "compression": "gzip"}
-        plan = {
-            "dataset": self._name,
-            "date": context.date.isoformat(),
-            "output_key": key,
-            "output_uri": artifact_uri(self._store, key),
-            "form_types": self.form_types,
-        }
-        if self._before_first_date(context):
-            return GenericResult(value={**plan, "status": "before_first_date", "output_writes": []})
+        plan = {**self.dataset.plan(context.date), "form_types": self.form_types}
+        if before_first_date(self.dataset, context.date):
+            return GenericResult(value={**plan, "status": "before_first_date"})
         if self.explain:
             return GenericResult(value={**plan, "status": "planned", "will_call_network": False})
-        if self._store is None:
-            raise ValueError("SEC filer refresh requires output.")
         if not self._will_fetch(context):
-            return GenericResult(
-                value={
-                    **plan,
-                    "status": "exists",
-                    "output_writes": [_existing_artifact(self._store, key, self._name, self.media_type, metadata)],
-                }
-            )
+            return GenericResult(value={**plan, "status": "exists"})
 
         filers = self._filers(context)
         self.staging_directory.mkdir(parents=True, exist_ok=True)
@@ -293,21 +233,11 @@ class SECFilerRefreshBundleModel(DatasetOutputMixin, CallableModel):
         with partial.open("rb") as source, gzip.open(compressed, "wb") as destination:
             for block in iter(lambda: source.read(1 << 20), b""):
                 destination.write(block)
-        metadata = {**metadata, "filer_count": len(filers)}
-        response = self._store.write_file(key, compressed, media_type=self.media_type, metadata=metadata)
-        status = str(response.get("status", "written")) if isinstance(response, dict) else "written"
+        metadata = {"provider": "sec", "format": "jsonl", "compression": "gzip", "filer_count": len(filers)}
+        writes = self.dataset.write_file(context.date, compressed, metadata=metadata, overwrite=self.overwrite_output)
         partial.unlink(missing_ok=True)
         compressed.unlink(missing_ok=True)
-        artifact = ETLArtifact(
-            key=key,
-            stage="extract",
-            status=status,
-            dataset=self._name,
-            uri=artifact_uri(self._store, key),
-            media_type=self.media_type,
-            metadata=metadata,
-        )
-        return GenericResult(value={**plan, "status": status, "filer_count": len(filers), "output_writes": [artifact.model_dump(mode="json")]})
+        return GenericResult(value={**plan, "status": writes[-1]["status"], "filer_count": len(filers), "output_writes": writes})
 
 
 def _day(value: str | None) -> date | None:

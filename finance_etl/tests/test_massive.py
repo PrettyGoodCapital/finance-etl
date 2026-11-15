@@ -8,6 +8,7 @@ import pytest
 from ccflow import Flow
 from ccflow_etl import (
     APIKeySecretCredentials,
+    DatasetDefinition,
     NoOpArtifactStore,
 )
 from ccflow_http import HTTPResult
@@ -61,6 +62,21 @@ class RecordingArtifactOutput:
     def write(self, key, payload, media_type=None, metadata=None):
         self.writes.append({"key": key, "payload": payload, "media_type": media_type, "metadata": metadata})
         return {"status": "written", "object": key}
+
+
+def _dataset(store, key_template, name="test-dataset", format="json", **kwargs) -> DatasetDefinition:
+    return DatasetDefinition(name=name, key_template=key_template, store=store, format=format, **kwargs)
+
+
+SUMMARY_KEYS = "massive/stocks/rest/daily-market-summary/json/{date}.json"
+OVERVIEW_KEYS = "massive/stocks/rest/ticker-overview/jsonl/{date}.jsonl.gz"
+ALL_TICKERS_KEYS = "massive/stocks/rest/all-tickers/{date}.json"
+
+
+def _flat_files(store, flat_file):
+    return _dataset(
+        store, f"massive/stocks/flat-files/{flat_file}/{{year}}/{{month}}/{{date}}.csv.gz", f"massive-stocks-flat-files-{flat_file}", "csv.gz"
+    )
 
 
 def test_massive_credentials_can_supply_api_key_without_environment(monkeypatch):
@@ -211,20 +227,20 @@ def test_massive_daily_ticker_summary_model_builds_open_close_request(monkeypatc
 def test_massive_daily_market_summary_extract_explain_plans_output_write(monkeypatch):
     monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
 
-    payload = MassiveDailyMarketSummaryExtractModel(output=NoOpArtifactStore(), explain=True)(["2025-01-02"]).value
+    payload = MassiveDailyMarketSummaryExtractModel(dataset=_dataset(NoOpArtifactStore(), SUMMARY_KEYS), explain=True)(["2025-01-02"]).value
 
     assert payload["status"] == "planned"
     assert payload["request"]["url"] == "/v2/aggs/grouped/locale/us/market/stocks/2025-01-02"
     assert payload["request"]["params"] == {"adjusted": True, "include_otc": False}
-    assert payload["output_key"] == "massive/stocks/rest/daily-market-summary/json/2025-01-02.json"
-    assert payload["output_writes"][0]["status"] == "planned"
+    assert payload["key"] == "massive/stocks/rest/daily-market-summary/json/2025-01-02.json"
+    assert payload["uri"] == "noop://artifact/massive/stocks/rest/daily-market-summary/json/2025-01-02.json"
 
 
 @pytest.mark.parametrize(
     ("model", "context", "partitions"),
     [
         (
-            MassiveDailyMarketSummaryExtractModel(output=NoOpArtifactStore(), explain=True),
+            MassiveDailyMarketSummaryExtractModel(dataset=_dataset(NoOpArtifactStore(), SUMMARY_KEYS), explain=True),
             DailyMarketSummaryContext(date="2025-01-02"),
             ["date"],
         ),
@@ -246,7 +262,7 @@ def test_massive_ticker_overview_bundle_explain_plans_one_daily_output(tmp_path)
     output = RecordingArtifactOutput()
     model = MassiveTickerOverviewBundleExtractModel(
         universe_model=ExplicitSymbolUniverseModel(symbols=["AAPL", "MSFT"]),
-        output=output,
+        dataset=_dataset(output, OVERVIEW_KEYS, format="jsonl.gz"),
         staging_directory=tmp_path,
         explain=True,
     )
@@ -255,10 +271,9 @@ def test_massive_ticker_overview_bundle_explain_plans_one_daily_output(tmp_path)
 
     assert payload["status"] == "planned"
     assert payload["will_call_network"] is False
-    assert payload["output_key"] == "massive/stocks/rest/ticker-overview/jsonl/2025-01-02.jsonl.gz"
+    assert payload["key"] == "massive/stocks/rest/ticker-overview/jsonl/2025-01-02.jsonl.gz"
     assert payload["request_template"]["url"] == "/v3/reference/tickers/{ticker}"
     assert payload["dataset_metadata"]["partition_keys"] == ["date"]
-    assert len(payload["output_writes"]) == 1
     assert output.writes == []
 
 
@@ -270,15 +285,17 @@ def test_massive_ticker_overview_bundle_declares_universe_dependency_only_when_f
     universe = ExplicitSymbolUniverseModel(symbols=["AAPL"])
     context = MassiveAllTickersContext(date="2025-01-02")
 
-    def bundle(**kwargs):
-        return MassiveTickerOverviewBundleExtractModel(universe_model=universe, staging_directory=tmp_path, **kwargs)
+    def bundle(store, **kwargs):
+        return MassiveTickerOverviewBundleExtractModel(
+            universe_model=universe, staging_directory=tmp_path, dataset=_dataset(store, OVERVIEW_KEYS, format="jsonl.gz"), **kwargs
+        )
 
-    deps = bundle(output=RecordingArtifactOutput()).__deps__(context)
+    deps = bundle(RecordingArtifactOutput()).__deps__(context)
 
     assert [(model, [ctx.date.isoformat() for ctx in contexts]) for model, contexts in deps] == [(universe, ["2025-01-02"])]
-    assert bundle(output=ExistingOutput()).__deps__(context) == []
-    assert bundle(output=ExistingOutput(), overwrite_output=True).__deps__(context) != []
-    assert bundle(output=RecordingArtifactOutput(), explain=True).__deps__(context) == []
+    assert bundle(ExistingOutput()).__deps__(context) == []
+    assert bundle(ExistingOutput(), overwrite_output=True).__deps__(context) != []
+    assert bundle(RecordingArtifactOutput(), explain=True).__deps__(context) == []
 
 
 def test_massive_ticker_overview_bundle_skips_existing_daily_output(tmp_path):
@@ -295,14 +312,13 @@ def test_massive_ticker_overview_bundle_skips_existing_daily_output(tmp_path):
     model = MassiveTickerOverviewBundleExtractModel(
         universe_model=ExplicitSymbolUniverseModel(symbols=["AAPL"]),
         overview_model=UnexpectedOverviewModel(),
-        output=output,
+        dataset=_dataset(output, OVERVIEW_KEYS, format="jsonl.gz"),
         staging_directory=tmp_path,
     )
 
     payload = model(["2025-01-02"]).value
 
     assert payload["status"] == "exists"
-    assert payload["requested_count"] == 0
     assert payload["will_call_network"] is False
     assert payload["will_publish_output"] is False
     assert output.writes == []
@@ -342,7 +358,7 @@ def test_massive_ticker_overview_bundle_resumes_staging_and_uploads_once(tmp_pat
     model = MassiveTickerOverviewBundleExtractModel(
         universe_model=ExplicitSymbolUniverseModel(symbols=["MSFT", "AAPL", "NVDA"]),
         overview_model=FakeOverviewModel(),
-        output=output,
+        dataset=_dataset(output, OVERVIEW_KEYS, format="jsonl.gz"),
         staging_directory=tmp_path,
         max_concurrency=2,
     )
@@ -386,7 +402,7 @@ def test_massive_ticker_overview_bundle_records_accepted_404_result_as_not_found
     model = MassiveTickerOverviewBundleExtractModel(
         universe_model=ExplicitSymbolUniverseModel(symbols=["AAPL", "MSFT"]),
         overview_model=FakeOverviewModel(),
-        output=output,
+        dataset=_dataset(output, OVERVIEW_KEYS, format="jsonl.gz"),
         staging_directory=tmp_path,
     )
 
@@ -408,14 +424,14 @@ def test_massive_daily_market_summary_extract_writes_raw_payload():
             return HTTPResult(value={"status": "OK", "results": [{"T": "AAPL", "c": 42.0}]}, status_code=200)
 
     output = RecordingArtifactOutput()
-    payload = MassiveDailyMarketSummaryExtractModel(market_summary_model=FakeMarketSummaryModel(), output=output)(
+    payload = MassiveDailyMarketSummaryExtractModel(market_summary_model=FakeMarketSummaryModel(), dataset=_dataset(output, SUMMARY_KEYS))(
         DailyMarketSummaryContext(date="2025-01-02")
     ).value
 
     assert payload["status"] == "written"
     assert output.writes[0]["key"] == "massive/stocks/rest/daily-market-summary/json/2025-01-02.json"
     assert output.writes[0]["media_type"] == "application/json"
-    assert output.writes[0]["metadata"] == {"date": "2025-01-02", "provider": "massive", "market": "stocks"}
+    assert output.writes[0]["metadata"] == {"date": "2025-01-02", "provider": "massive", "market": "stocks", "adjusted": True, "include_otc": False}
     assert json.loads(output.writes[0]["payload"]) == {"results": [{"T": "AAPL", "c": 42.0}], "status": "OK"}
 
 
@@ -543,14 +559,13 @@ def test_massive_dated_symbol_universe_fetches_normalized_symbols():
 
 
 def test_massive_flat_file_transfer_explain_plans_stock_source_and_output():
-    payload = MassiveFlatFileTransferModel(flat_file="trades", output=NoOpArtifactStore(), explain=True)(["2025-11-05"]).value
+    payload = MassiveFlatFileTransferModel(flat_file="trades", dataset=_flat_files(NoOpArtifactStore(), "trades"), explain=True)(["2025-11-05"]).value
 
     assert payload["dataset"] == "massive-stocks-flat-files-trades"
     assert payload["source_key"] == "us_stocks_sip/trades_v1/2025/11/2025-11-05.csv.gz"
     assert payload["source_uri"] == "s3://flatfiles/us_stocks_sip/trades_v1/2025/11/2025-11-05.csv.gz"
-    assert payload["output_key"] == "massive/stocks/flat-files/trades/2025/11/2025-11-05.csv.gz"
+    assert payload["key"] == "massive/stocks/flat-files/trades/2025/11/2025-11-05.csv.gz"
     assert payload["will_download"] is False
-    assert payload["output_writes"][0]["status"] == "planned"
     assert payload["required_env"] == ["MASSIVE_API_KEY_ID", "MASSIVE_API_KEY"]
 
 
@@ -583,7 +598,7 @@ def test_massive_flat_file_transfer_downloads_and_writes_output(tmp_path):
 
     source_client = FakeSourceClient()
     output = FakeOutput()
-    model = MassiveFlatFileTransferModel(flat_file="quotes", source_client=source_client, output=output, local_dir=tmp_path)
+    model = MassiveFlatFileTransferModel(flat_file="quotes", source_client=source_client, dataset=_flat_files(output, "quotes"), local_dir=tmp_path)
 
     payload = model(["2025-11-05"]).value
 
@@ -614,7 +629,9 @@ def test_massive_flat_file_transfer_records_unavailable_dates_when_asked(tmp_pat
         def write_file(self, key, path, media_type=None, metadata=None):
             raise AssertionError("unavailable dates must not be written")
 
-    model = MassiveFlatFileTransferModel(flat_file="trades", source_client=FakeSourceClient(), output=FakeOutput(), local_dir=tmp_path)
+    model = MassiveFlatFileTransferModel(
+        flat_file="trades", source_client=FakeSourceClient(), dataset=_flat_files(FakeOutput(), "trades"), local_dir=tmp_path
+    )
 
     with pytest.raises(Forbidden):
         model(["2019-11-05"])
@@ -626,15 +643,15 @@ def test_massive_flat_file_transfer_records_unavailable_dates_when_asked(tmp_pat
 def test_massive_all_tickers_explain_plans_single_json_output(monkeypatch):
     monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
 
-    payload = MassiveAllTickersModel(output=NoOpArtifactStore(), explain=True)(["2025-01-02"]).value
+    dataset = _dataset(NoOpArtifactStore(), ALL_TICKERS_KEYS, "massive-stocks-rest-all-tickers")
+    payload = MassiveAllTickersModel(dataset=dataset, explain=True)(["2025-01-02"]).value
 
     assert payload["dataset"] == "massive-stocks-rest-all-tickers"
     assert payload["status"] == "planned"
     assert payload["ticker_request"]["url"] == "/v3/reference/tickers"
     assert payload["ticker_request"]["params"] == {"market": "stocks", "active": True, "limit": 1000, "date": "2025-01-02"}
-    assert payload["output_key"] == "massive/stocks/rest/all-tickers/2025-01-02.json"
-    assert payload["output_uri"] == "noop://artifact/massive/stocks/rest/all-tickers/2025-01-02.json"
-    assert payload["output_writes"][0]["status"] == "planned"
+    assert payload["key"] == "massive/stocks/rest/all-tickers/2025-01-02.json"
+    assert payload["uri"] == "noop://artifact/massive/stocks/rest/all-tickers/2025-01-02.json"
     assert payload["provider_metadata"]["retry"]["retry_status_codes"] == [429, 500, 502, 503, 504]
 
 
@@ -668,7 +685,9 @@ def test_massive_all_tickers_writes_combined_raw_json():
             return {"status": "written", "object": key}
 
     output = FakeOutput()
-    payload = MassiveAllTickersModel(tickers_model=FakeTickersModel(), output=output)(MassiveAllTickersContext(date="2025-01-02")).value
+    payload = MassiveAllTickersModel(tickers_model=FakeTickersModel(), dataset=_dataset(output, ALL_TICKERS_KEYS))(
+        MassiveAllTickersContext(date="2025-01-02")
+    ).value
 
     assert payload["status"] == "written"
     assert payload["ticker_count"] == 2
@@ -695,7 +714,7 @@ def test_massive_all_tickers_preflights_output_before_http_download():
         def exists(self, key):
             raise RuntimeError("missing output credentials")
 
-    model = MassiveAllTickersModel(tickers_model=FakeTickersModel(), output=MissingCredentialOutput())
+    model = MassiveAllTickersModel(tickers_model=FakeTickersModel(), dataset=_dataset(MissingCredentialOutput(), ALL_TICKERS_KEYS))
 
     with pytest.raises(RuntimeError, match="missing output credentials"):
         model(["2025-01-02"])
@@ -719,12 +738,12 @@ def test_massive_all_tickers_skips_http_when_output_exists():
         def exists(self, key):
             return True
 
-    payload = MassiveAllTickersModel(tickers_model=FakeTickersModel(), output=ExistingOutput())(["2025-01-02"]).value
+    payload = MassiveAllTickersModel(tickers_model=FakeTickersModel(), dataset=_dataset(ExistingOutput(), ALL_TICKERS_KEYS))(["2025-01-02"]).value
 
     assert calls == []
     assert payload["status"] == "exists"
     assert payload["will_call_network"] is False
-    assert payload["output_writes"][0]["artifact"]["uri"] == "s3://shared/massive/stocks/rest/all-tickers/2025-01-02.json"
+    assert payload["uri"] == "s3://shared/massive/stocks/rest/all-tickers/2025-01-02.json"
 
 
 def test_massive_tickers_model_paginates_next_url(monkeypatch):
@@ -816,9 +835,7 @@ def test_massive_dated_reference_extract_writes_one_market_wide_daily_artifact(m
     model = MassiveDatedReferenceExtractModel(
         reference_model=FakeReferenceModel(path="/stocks/v1/splits", date_field="execution_date"),
         reference_name="splits",
-        output=output,
-        output_key_prefix="massive/stocks/rest/splits",
-        dataset_name="massive-stocks-rest-splits",
+        dataset=_dataset(output, "massive/stocks/rest/splits/json/{year}/{month}/{date}.json", "massive-stocks-rest-splits"),
     )
 
     payload = model(["2025-01-02"]).value
@@ -836,8 +853,6 @@ def test_massive_dated_reference_extract_writes_one_market_wide_daily_artifact(m
 
 
 def test_massive_dated_reference_extract_writes_through_a_dataset_and_skips_dates_before_it(monkeypatch):
-    from ccflow_etl import DatasetDefinition
-
     calls = []
 
     class FakeReferenceModel(MassiveDatedReferenceModel):
@@ -862,12 +877,10 @@ def test_massive_dated_reference_extract_writes_through_a_dataset_and_skips_date
     early = model(["2024-02-05"]).value
     payload = model(["2025-01-02"]).value
 
-    assert (early["status"], early["output_writes"]) == ("before_first_date", [])
+    assert early["status"] == "before_first_date"
     assert calls == [date(2025, 1, 2)]
     assert (payload["status"], payload["dataset"]) == ("written", "massive-stocks-rest-short-volume")
     assert output.writes[0]["key"] == "massive/stocks/rest/short-volume/json/2025/01/2025-01-02.json"
-    with pytest.raises(ValueError, match="needs a dataset"):
-        MassiveDatedReferenceExtractModel(reference_model=FakeReferenceModel(path="/x", date_field="date"), reference_name="x")
 
 
 @pytest.mark.parametrize(
@@ -882,26 +895,22 @@ def test_massive_reference_snapshot_plans_one_market_wide_capture(reference_mode
     model = MassiveReferenceSnapshotExtractModel(
         reference_model=reference_model,
         reference_name=reference_name,
-        output=NoOpArtifactStore(),
-        output_key_prefix=f"massive/stocks/rest/{reference_name}",
-        dataset_name=f"massive-stocks-rest-{reference_name}",
+        dataset=_dataset(NoOpArtifactStore(), f"massive/stocks/rest/{reference_name}/json/{{year}}/{{month}}/{{date}}.json"),
         explain=True,
     )
 
     payload = model(MassiveReferenceSnapshotContext(date="2025-01-02")).value
 
     assert payload["status"] == "planned"
-    assert payload["capture_date"] == "2025-01-02"
+    assert payload["date"] == "2025-01-02"
     assert payload["will_call_network"] is False
     assert payload["request"]["url"] == reference_model.path
     assert "ticker" not in payload["request"]["params"]
-    assert payload["output_key"] == f"massive/stocks/rest/{reference_name}/json/2025/01/2025-01-02.json"
+    assert payload["key"] == f"massive/stocks/rest/{reference_name}/json/2025/01/2025-01-02.json"
     assert payload["dataset_metadata"]["partition_keys"] == ["capture_date"]
 
 
 def test_massive_flat_file_transfer_plans_dataset_keys_and_skips_dates_before_it():
-    from ccflow_etl import DatasetDefinition
-
     dataset = DatasetDefinition(
         name="raw-trades", key_template="raw/trades/{year}/{date}.csv.gz", store=NoOpArtifactStore(), format="csv.gz", first_date=date(2021, 10, 11)
     )
@@ -910,6 +919,6 @@ def test_massive_flat_file_transfer_plans_dataset_keys_and_skips_dates_before_it
     planned = model(["2025-11-05"]).value
     early = model(["2021-10-08"]).value
 
-    assert (planned["status"], planned["dataset"], planned["output_key"]) == ("planned", "raw-trades", "raw/trades/2025/2025-11-05.csv.gz")
+    assert (planned["status"], planned["dataset"], planned["key"]) == ("planned", "raw-trades", "raw/trades/2025/2025-11-05.csv.gz")
     assert planned["source_key"] == "us_stocks_sip/trades_v1/2025/11/2025-11-05.csv.gz"
     assert early["status"] == "before_first_date"

@@ -3,7 +3,7 @@ import json
 from datetime import date
 
 import httpx2
-from ccflow_etl import LocalFileOutput
+from ccflow_etl import DatasetDefinition, LocalFileOutput
 from ccflow_http import HTTPConfig
 
 from finance_etl import SECDailyIndexExtractModel, SECDailyIndexModel, SECDateContext, SECFilerRefreshBundleModel, SECHTTPModel, parse_master_index
@@ -35,7 +35,14 @@ def _index_extract(store, routes, seen):
     model = SECDailyIndexModel(
         config=HTTPConfig(base_url="https://www.sec.gov", transport=_transport(routes, seen)), user_agent=UA, execution_policy=None
     )
-    return SECDailyIndexExtractModel(index_model=model, output=store)
+    dataset = DatasetDefinition(
+        name="sec-edgar-daily-index",
+        key_template="sec/edgar/daily-index/{year}/{month}/{date}.idx",
+        store=store,
+        format="bytes",
+        media_type="text/plain",
+    )
+    return SECDailyIndexExtractModel(index_model=model, dataset=dataset)
 
 
 def test_parse_master_index_reads_rows_after_the_separator():
@@ -97,7 +104,9 @@ def _bundle(tmp_path, seen):
         index_extract=_index_extract(store, routes, seen),
         facts_model=http("https://data.sec.gov"),
         submissions_model=http("https://data.sec.gov"),
-        output=store,
+        dataset=DatasetDefinition(
+            name="sec-edgar-filer-refresh", key_template="sec/edgar/filer-refresh/jsonl/{date}.jsonl.gz", store=store, format="jsonl.gz"
+        ),
         staging_directory=tmp_path / "staging",
     )
     return model, store

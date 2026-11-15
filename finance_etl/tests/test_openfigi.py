@@ -4,6 +4,7 @@ import gzip
 import json
 
 from ccflow import Flow
+from ccflow_etl import DatasetDefinition
 from ccflow_http import HTTPRequestContext, HTTPResult, RedactionPolicy, safe_request_dump
 
 from finance_etl.providers.openfigi import OpenFIGIMappingCaptureModel, OpenFIGIMappingModel, openfigi_ticker_queries
@@ -16,6 +17,15 @@ RECORDS = [
     {"ticker": "ABRpD", "type": "PFD", "name": "Arbor Realty Trust Series D Preferred"},
     {"ticker": "ZZZZ", "type": "CS", "name": "Unknown Corp"},
 ]
+
+
+def _capture(store, **kwargs) -> OpenFIGIMappingCaptureModel:
+    """A mapping capture that reads all-tickers snapshots from and writes bundles to ``store``."""
+    return OpenFIGIMappingCaptureModel(
+        snapshot=DatasetDefinition(name="all-tickers", key_template="massive/stocks/rest/all-tickers/{date}.json", store=store, format="json"),
+        dataset=DatasetDefinition(name="openfigi-mapping", key_template="openfigi/mapping/jsonl/{date}.jsonl.gz", store=store, format="jsonl.gz"),
+        **kwargs,
+    )
 
 
 class MemoryStore:
@@ -71,7 +81,7 @@ def test_openfigi_capture_looks_up_records_without_figi_and_tries_fallback_forms
             return HTTPResult(value=responses, status_code=200)
 
     store = MemoryStore({SNAPSHOT_KEY: json.dumps({"results": RECORDS}).encode()})
-    model = OpenFIGIMappingCaptureModel(output=store, mapping_model=FakeMappingModel())
+    model = _capture(store, mapping_model=FakeMappingModel())
 
     payload = model("2025-01-06").value
     rows = {
@@ -102,7 +112,7 @@ def test_openfigi_capture_batches_jobs_per_request():
     records = [{"ticker": f"T{index:03d}", "type": "CS"} for index in range(250)]
     store = MemoryStore({SNAPSHOT_KEY: json.dumps({"results": records}).encode()})
 
-    OpenFIGIMappingCaptureModel(output=store, mapping_model=FakeMappingModel())("2025-01-06")
+    _capture(store, mapping_model=FakeMappingModel())("2025-01-06")
 
     assert sizes == [100, 100, 50]
 
@@ -113,12 +123,12 @@ def test_openfigi_capture_explain_and_existing_output_skip_network():
         def __call__(self, context):
             raise AssertionError("no mapping requests expected")
 
-    explain = OpenFIGIMappingCaptureModel(output=MemoryStore(), explain=True, mapping_model=FailingMappingModel())("2025-01-06").value
+    explain = _capture(MemoryStore(), explain=True, mapping_model=FailingMappingModel())("2025-01-06").value
     assert explain["status"] == "planned"
     assert explain["snapshot_key"] == SNAPSHOT_KEY
 
     existing = MemoryStore({"openfigi/mapping/jsonl/2025-01-06.jsonl.gz": b""})
-    assert OpenFIGIMappingCaptureModel(output=existing, mapping_model=FailingMappingModel())("2025-01-06").value["status"] == "exists"
+    assert _capture(existing, mapping_model=FailingMappingModel())("2025-01-06").value["status"] == "exists"
 
 
 def test_isin_from_cusip_computes_check_digits():

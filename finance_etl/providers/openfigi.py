@@ -7,20 +7,14 @@ from typing import Any
 from ccflow import CallableModel, ContextType, DateContext, Flow, GenericResult, GraphDepList
 from ccflow_etl import (
     APITokenCredentials,
-    ArtifactReadContext,
-    ArtifactReadModel,
-    ArtifactWriteContext,
-    ArtifactWriteModel,
     DatasetDefinition,
-    ETLArtifact,
     ExecutionPolicy,
-    artifact_uri,
 )
 from ccflow_http import HTTPModel, HTTPRequest, HTTPRequestContext, HTTPRetryPolicy, RedactionPolicy
 from ccflow_http.base import HTTPContext, HTTPMethod
 from pydantic import Field
 
-from finance_etl.providers._dataset_output import DatasetOutputMixin
+from finance_etl.providers._dataset_output import before_first_date
 
 __all__ = (
     "OpenFIGICredentials",
@@ -77,7 +71,7 @@ def openfigi_ticker_queries(ticker: str) -> list[str]:
     return [ticker]
 
 
-class OpenFIGIMappingCaptureModel(DatasetOutputMixin, CallableModel):
+class OpenFIGIMappingCaptureModel(CallableModel):
     """Capture OpenFIGI mappings for the records in a dated listings snapshot that have no composite FIGI.
 
     Each record is looked up by ticker on the US composite exchange, trying the forms from
@@ -86,9 +80,8 @@ class OpenFIGIMappingCaptureModel(DatasetOutputMixin, CallableModel):
     """
 
     mapping_model: OpenFIGIMappingModel = Field(default_factory=OpenFIGIMappingModel)
-    snapshot: DatasetDefinition | None = Field(default=None, description="Snapshot dataset; replaces snapshot_store and snapshot_key_template.")
-    snapshot_store: Any | None = Field(default=None, description="Store holding the snapshots; defaults to output.")
-    snapshot_key_template: str = "massive/stocks/rest/all-tickers/{date}.json"
+    dataset: DatasetDefinition = Field(description="Date-partitioned dataset each date's compressed JSONL bundle is written to.")
+    snapshot: DatasetDefinition = Field(description="Dataset of dated listings snapshots whose records are looked up.")
     snapshot_model: CallableModel | None = Field(default=None, description="Model that produces the snapshot for a date, declared as a dependency.")
     records_key: str = "results"
     ticker_field: str = "ticker"
@@ -99,12 +92,8 @@ class OpenFIGIMappingCaptureModel(DatasetOutputMixin, CallableModel):
         default_factory=lambda: ["PFD", "SP"],
         description="Types OpenFIGI does not index under exchange symbols (preferreds and exchange-listed notes); recorded as skipped.",
     )
-    output: Any | None = None
-    output_key_prefix: str = "openfigi/mapping"
-    dataset_name: str = "openfigi-mapping"
     explain: bool = False
     overwrite_output: bool = False
-    media_type: str = "application/gzip"
 
     @property
     def context_type(self) -> type[DateContext]:
@@ -114,21 +103,10 @@ class OpenFIGIMappingCaptureModel(DatasetOutputMixin, CallableModel):
     def result_type(self) -> type[GenericResult]:
         return GenericResult
 
-    def output_key(self, context: DateContext) -> str:
-        return f"{self.output_key_prefix.strip('/')}/jsonl/{context.date.isoformat()}.jsonl.gz"
-
-    def snapshot_key(self, value: date) -> str:
-        return self.snapshot.key(value) if self.snapshot is not None else self.snapshot_key_template.format(date=value.isoformat())
-
-    def _snapshot_store(self) -> Any:
-        if self.snapshot is not None:
-            return self.snapshot.resolved_store()
-        return self.snapshot_store if self.snapshot_store is not None else self._store
-
     def _will_fetch(self, context: DateContext) -> bool:
-        if self.explain or self._store is None or self._before_first_date(context):
+        if self.explain or before_first_date(self.dataset, context.date):
             return False
-        return self.overwrite_output or not (hasattr(self._store, "exists") and self._store.exists(self._key(context)))
+        return self.overwrite_output or not self.dataset.exists(context.date)
 
     def _snapshot_context(self, context: DateContext) -> ContextType:
         assert self.snapshot_model is not None
@@ -141,11 +119,9 @@ class OpenFIGIMappingCaptureModel(DatasetOutputMixin, CallableModel):
         return [(self.snapshot_model, [self._snapshot_context(context)])]
 
     def _records(self, value: date) -> list[dict[str, Any]] | None:
-        store = self._snapshot_store()
-        key = self.snapshot_key(value)
-        if hasattr(store, "exists") and not store.exists(key):
+        if not self.snapshot.exists(value):
             return None
-        payload = json.loads(ArtifactReadModel(store=store)(ArtifactReadContext(key=key)).payload)
+        payload = json.loads(self.snapshot.read_bytes(value))
         records = payload.get(self.records_key, []) if isinstance(payload, dict) else payload
         return [record for record in records if isinstance(record, dict) and record.get(self.ticker_field)]
 
@@ -178,29 +154,18 @@ class OpenFIGIMappingCaptureModel(DatasetOutputMixin, CallableModel):
 
     @Flow.call
     def __call__(self, context: DateContext) -> GenericResult:
-        key = self._key(context)
-        plan = {
-            "dataset": self._name,
-            "date": context.date.isoformat(),
-            "snapshot_key": self.snapshot_key(context.date),
-            "output_key": key,
-            "output_uri": artifact_uri(self._store, key),
-        }
-        if self._before_first_date(context):
-            return GenericResult(value={**plan, "status": "before_first_date", "output_writes": []})
+        plan = {**self.dataset.plan(context.date), "snapshot_key": self.snapshot.key(context.date)}
+        if before_first_date(self.dataset, context.date):
+            return GenericResult(value={**plan, "status": "before_first_date"})
         if self.explain:
             return GenericResult(value={**plan, "status": "planned", "will_call_network": False})
-        if self._store is None:
-            raise ValueError("OpenFIGI mapping capture requires output.")
-        metadata = {"date": plan["date"], "provider": "openfigi", "dataset": self._name}
         if not self._will_fetch(context):
-            artifact = ETLArtifact(key=key, stage="extract", status="exists", dataset=self._name, uri=plan["output_uri"], media_type=self.media_type)
-            return GenericResult(value={**plan, "status": "exists", "output_writes": [artifact.model_dump(mode="json")]})
+            return GenericResult(value={**plan, "status": "exists"})
         if self.snapshot_model is not None:
             self.snapshot_model(self._snapshot_context(context))
         records = self._records(context.date)
         if records is None:
-            return GenericResult(value={**plan, "status": "no_snapshot", "output_writes": []})
+            return GenericResult(value={**plan, "status": "no_snapshot"})
         missing = [record for record in records if not record.get(self.figi_field)]
         lookup = [record for record in missing if record.get(self.type_field) not in self.skip_types]
         results = self._lookup(sorted({record[self.ticker_field] for record in lookup}))
@@ -212,26 +177,16 @@ class OpenFIGIMappingCaptureModel(DatasetOutputMixin, CallableModel):
             rows.append({"date": plan["date"], "captured_at": captured_at, "exchange_code": self.exchange_code, "record": record, **outcome})
         counts = {status: sum(row["status"] == status for row in rows) for status in ("matched", "no_match", "skipped")}
         payload = gzip.compress(b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows))
-        metadata = {**metadata, "record_count": len(rows), **{f"{status}_count": count for status, count in counts.items()}}
-        write = ArtifactWriteModel(store=self._store)(
-            ArtifactWriteContext(
-                key=key,
-                payload=payload,
-                media_type=self.media_type,
-                dataset=self._name,
-                stage="extract",
-                overwrite=self.overwrite_output,
-                metadata=metadata,
-            )
-        )
+        metadata = {"provider": "openfigi", "record_count": len(rows), **{f"{status}_count": count for status, count in counts.items()}}
+        writes = self.dataset.write_bytes(context.date, payload, metadata=metadata, overwrite=self.overwrite_output)
         return GenericResult(
             value={
                 **plan,
-                "status": write.status,
+                "status": writes[-1]["status"],
                 "snapshot_record_count": len(records),
                 "record_count": len(rows),
                 **{f"{status}_count": count for status, count in counts.items()},
-                "output_writes": [write.model_dump(mode="json")],
+                "output_writes": writes,
             }
         )
 

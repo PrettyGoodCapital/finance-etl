@@ -5,7 +5,7 @@ import json
 from datetime import date
 
 from ccflow import Flow
-from ccflow_etl import WeekdayCalendar
+from ccflow_etl import DatasetDefinition, WeekdayCalendar
 from ccflow_http import HTTPResult
 
 from finance_etl.providers.massive import MassiveTickerEventsExtractModel, TickerEventsModel, diff_ticker_snapshots
@@ -40,6 +40,18 @@ class MemoryStore:
     def write(self, key, payload, media_type=None, metadata=None):
         self.objects[key] = payload
         return {"status": "written", "object": key}
+
+
+def _model(store, **kwargs) -> MassiveTickerEventsExtractModel:
+    """A ticker events extract that reads snapshots from and writes bundles to ``store``."""
+    return MassiveTickerEventsExtractModel(
+        snapshot=DatasetDefinition(name="all-tickers", key_template="massive/stocks/rest/all-tickers/{date}.json", store=store, format="json"),
+        dataset=DatasetDefinition(
+            name="ticker-events", key_template="massive/stocks/rest/ticker-events/jsonl/{date}.jsonl.gz", store=store, format="jsonl.gz"
+        ),
+        calendar=WeekdayCalendar(),
+        **kwargs,
+    )
 
 
 def _snapshots():
@@ -79,7 +91,7 @@ def test_ticker_events_extract_requests_events_only_for_changed_figis():
             return HTTPResult(value={"results": {"name": "Renamed Co", "events": events}}, status_code=200)
 
     store = MemoryStore(_snapshots())
-    model = MassiveTickerEventsExtractModel(output=store, calendar=WeekdayCalendar(), events_model=FakeEventsModel())
+    model = _model(store, events_model=FakeEventsModel())
 
     payload = model(["2025-01-06"]).value
     key = "massive/stocks/rest/ticker-events/jsonl/2025-01-06.jsonl.gz"
@@ -99,7 +111,7 @@ def test_ticker_events_extract_requests_events_only_for_changed_figis():
 
 
 def test_ticker_events_extract_explain_plans_both_snapshots_without_network():
-    model = MassiveTickerEventsExtractModel(output=MemoryStore(), calendar=WeekdayCalendar(), explain=True)
+    model = _model(MemoryStore(), explain=True)
 
     payload = model(["2025-01-06"]).value
 
@@ -115,20 +127,18 @@ def test_ticker_events_extract_skips_existing_output_and_missing_previous_snapsh
             raise AssertionError("no events should be requested")
 
     existing = MemoryStore({**_snapshots(), "massive/stocks/rest/ticker-events/jsonl/2025-01-06.jsonl.gz": b""})
-    model = MassiveTickerEventsExtractModel(output=existing, calendar=WeekdayCalendar(), events_model=FailingEventsModel())
+    model = _model(existing, events_model=FailingEventsModel())
     assert model(["2025-01-06"]).value["status"] == "exists"
 
     first = MemoryStore(_snapshots())
-    model = MassiveTickerEventsExtractModel(output=first, calendar=WeekdayCalendar(), events_model=FailingEventsModel())
+    model = _model(first, events_model=FailingEventsModel())
     payload = model(["2025-01-03"]).value
     assert payload["status"] == "no_previous_snapshot"
-    assert payload["output_writes"] == []
+    assert "output_writes" not in payload
     assert model.previous_session(date(2025, 1, 3)) == date(2025, 1, 2)
 
 
 def test_ticker_events_extract_reads_and_writes_through_datasets():
-    from ccflow_etl import DatasetDefinition
-
     class NoEventsModel(TickerEventsModel):
         @Flow.call
         def __call__(self, context):

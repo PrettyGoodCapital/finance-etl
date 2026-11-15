@@ -50,6 +50,8 @@ The packaged credential config reads secrets from environment variables; it does
 
 Massive stock REST wrappers also cover ticker overview (`/v3/reference/tickers/{ticker}`), grouped daily market summary (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), and daily ticker open/close (`/v1/open-close/{ticker}/{date}`). `MassiveTickerOverviewBundleExtractModel` resolves a dated symbol universe, makes bounded concurrent single-ticker overview requests, resumes local JSONL staging, and publishes one compressed object per date.
 
+Extract models write through a required `dataset` (`ccflow_etl.DatasetDefinition`), which supplies the partition key, stores, format, media type and first date; explain results include the dataset's plan record (`key`, `uri`).
+
 `MassiveTickerOverviewBundleExtractModel` writes one compressed JSONL bundle per date and declares its symbol universe as a graph dependency when it will fetch. `ArtifactSymbolUniverseModel` reads symbols from a stored artifact and accepts an optional `source_model` that produces that artifact; the source model is declared as a dependency and called before the read. A bundle's overview model can set `accepted_status_codes: [404]` so tickers that no longer resolve are recorded as `not_found` without raising.
 
 ## Documentation

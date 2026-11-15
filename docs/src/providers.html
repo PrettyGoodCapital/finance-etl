@@ -13,7 +13,7 @@
     <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../../_static/graphviz.css?v=4ae1632d" />
     <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
-    <link rel="stylesheet" type="text/css" href="../../_static/sphinx-design.min.css?v=95c83b7e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/sphinx-design.min.css?v=6a604523" />
     <link rel="stylesheet" type="text/css" href="../../_static/fonts/fuma-fonts.css?v=c2892c73" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/custom.css?v=88c24c6a" />
     <script src="../../_static/documentation_options.js?v=01f34227"></script>
@@ -21,7 +21,7 @@
     <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="../../_static/copybutton.js?v=f281be69"></script>
-    <script src="../../_static/design-tabs.js?v=f930bc37"></script>
+    <script data-sd-tabs-storage-prefix="sphinx-design-tab-id-" src="../../_static/design-tabs.js?v=fcb327ea"></script>
     <script data-searchlite-index="searchlite-index.json" defer="defer" src="../../_static/searchlite.js?v=a5320898"></script>
     <script defer="defer" src="../../_static/fuma.js?v=9c325f6c"></script>
     <script src="../../_static/js/custom.js?v=956e5d78"></script>
@@ -122,9 +122,6 @@
     <a href="#massive">Massive</a>
   </li>
   <li class="fd-toc-item" data-depth="1">
-    <a href="#dataset-config">Dataset Config</a>
-  </li>
-  <li class="fd-toc-item" data-depth="1">
     <a href="#credentials">Credentials</a>
   </li>
   <li class="fd-toc-item" data-depth="1">
@@ -147,31 +144,11 @@
 <li><p>market holidays and exchange metadata</p></li>
 <li><p>paginated ticker metadata</p></li>
 <li><p>date-specific ticker-universe request planning</p></li>
-<li><p>date and symbol daily aggregate request planning</p></li>
 <li><p>daily aggregate HTTP requests</p></li>
 <li><p>session-date planning for US stock market data</p></li>
-<li><p>daily ticker summary explain plans with dataset/provider metadata, redacted HTTP requests, output keys, and artifact write plans</p></li>
 </ul>
 <p>The provider models build on the generic <code class="docutils literal notranslate"><span class="pre">ccflow-http</span></code> request machinery. They do not install package-specific workflow CLIs and do not hard-code storage outputs.</p>
-<p><code class="docutils literal notranslate"><span class="pre">MassiveDailyTickerSummaryModel</span></code> is the first public composition model. It uses <code class="docutils literal notranslate"><span class="pre">ccflow-http</span></code> request models, <code class="docutils literal notranslate"><span class="pre">ccflow-etl</span></code> artifact IO contracts, and an optional <code class="docutils literal notranslate"><span class="pre">ccflow-etl</span></code> <code class="docutils literal notranslate"><span class="pre">ArtifactWriteModel</span></code>. In explain mode it does not require credentials, does not call Massive, and emits planned artifact writes when a writer is configured. Live execution still requires <code class="docutils literal notranslate"><span class="pre">MASSIVE_API_KEY</span></code>; applications provide the concrete artifact store through config.</p>
-<p>Applications should normally select this surface as <code class="docutils literal notranslate"><span class="pre">dataset=/datasets/massive/stocks/rest/ticker-summary</span></code> and run it through a generic task such as <code class="docutils literal notranslate"><span class="pre">task=/tasks/extract</span></code>. Provider, retry, request, and schema metadata live on the dataset model.</p>
 <p>Downstream normalization belongs in <code class="docutils literal notranslate"><span class="pre">finance-flow</span></code>, which already owns Massive-shaped daily-bar normalization contracts.</p>
-</section>
-<section id="dataset-config">
-<h2>Dataset Config<a class="headerlink" href="#dataset-config" title="Link to this heading">¶</a></h2>
-<p>Compose Massive REST ticker-summary with:</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">defaults</span><span class="p">:</span>
-<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">/credentials</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/credentials/providers/massive/rest</span>
-<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">dataset</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/datasets/massive/stocks/rest/ticker-summary</span>
-<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">_self_</span>
-
-<span class="nt">hydra</span><span class="p">:</span>
-<span class="w">  </span><span class="nt">searchpath</span><span class="p">:</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pkg://finance_etl.config</span>
-</pre></div>
-</div>
-<p>The dataset config selects <code class="docutils literal notranslate"><span class="pre">MassiveDailyTickerSummaryModel</span></code>, whose metadata methods expose the semantic dataset name, schema name/version, provider name, retry hints, and request shape.</p>
-<p>Parquet materialization is selected on the dataset with <code class="docutils literal notranslate"><span class="pre">+dataset.return_type=parquet</span></code>; no separate transform selector is required for this Massive surface.</p>
 </section>
 <section id="credentials">
 <h2>Credentials<a class="headerlink" href="#credentials" title="Link to this heading">¶</a></h2>
@@ -244,9 +221,6 @@
     </svg><ul class="fd-toc-list">
   <li class="fd-toc-item" data-depth="1">
     <a href="#massive">Massive</a>
-  </li>
-  <li class="fd-toc-item" data-depth="1">
-    <a href="#dataset-config">Dataset Config</a>
   </li>
   <li class="fd-toc-item" data-depth="1">
     <a href="#credentials">Credentials</a>

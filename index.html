@@ -13,7 +13,7 @@
     <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
     <link rel="stylesheet" type="text/css" href="_static/autodoc_pydantic.css" />
-    <link rel="stylesheet" type="text/css" href="_static/sphinx-design.min.css?v=95c83b7e" />
+    <link rel="stylesheet" type="text/css" href="_static/sphinx-design.min.css?v=6a604523" />
     <link rel="stylesheet" type="text/css" href="_static/fonts/fuma-fonts.css?v=c2892c73" />
     <link rel="stylesheet" type="text/css" href="_static/styles/custom.css?v=88c24c6a" />
     <script src="_static/documentation_options.js?v=01f34227"></script>
@@ -21,7 +21,7 @@
     <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="_static/copybutton.js?v=f281be69"></script>
-    <script src="_static/design-tabs.js?v=f930bc37"></script>
+    <script data-sd-tabs-storage-prefix="sphinx-design-tab-id-" src="_static/design-tabs.js?v=fcb327ea"></script>
     <script data-searchlite-index="searchlite-index.json" defer="defer" src="_static/searchlite.js?v=a5320898"></script>
     <script defer="defer" src="_static/fuma.js?v=9c325f6c"></script>
     <script src="_static/js/custom.js?v=956e5d78"></script>
@@ -181,16 +181,8 @@
 </pre></div>
 </div>
 <p>The packaged credential config reads secrets from environment variables; it does not store secrets in public package config.</p>
-<p>Massive also publishes a reusable dataset config:</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">defaults</span><span class="p">:</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">/credentials</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/credentials/providers/massive/rest</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">dataset</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/datasets/massive/stocks/rest/ticker-summary</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">_self_</span>
-</pre></div>
-</div>
-<p>The config selects <code class="docutils literal notranslate"><span class="pre">MassiveDailyTickerSummaryModel</span></code> for the semantic dataset <code class="docutils literal notranslate"><span class="pre">massive-daily-ticker-summary</span></code>. Provider and schema metadata live on that concrete model. Applications can select <code class="docutils literal notranslate"><span class="pre">dataset=/datasets/massive/stocks/rest/ticker-summary</span></code> and run it through generic tasks such as <code class="docutils literal notranslate"><span class="pre">task=/tasks/extract</span></code>.</p>
-<p><code class="docutils literal notranslate"><span class="pre">MassiveDailyTickerSummaryModel</span></code> accepts an optional generic <code class="docutils literal notranslate"><span class="pre">ccflow-etl</span></code> <code class="docutils literal notranslate"><span class="pre">ArtifactWriteModel</span></code>. Explain runs emit output keys and planned writes without provider I/O; live runs can write raw provider payloads through the configured artifact store.</p>
 <p>Massive stock REST wrappers also cover ticker overview (<code class="docutils literal notranslate"><span class="pre">/v3/reference/tickers/{ticker}</span></code>), grouped daily market summary (<code class="docutils literal notranslate"><span class="pre">/v2/aggs/grouped/locale/us/market/stocks/{date}</span></code>), and daily ticker open/close (<code class="docutils literal notranslate"><span class="pre">/v1/open-close/{ticker}/{date}</span></code>). <code class="docutils literal notranslate"><span class="pre">MassiveTickerOverviewBundleExtractModel</span></code> resolves a dated symbol universe, makes bounded concurrent single-ticker overview requests, resumes local JSONL staging, and publishes one compressed object per date.</p>
+<p>Extract models write through a required <code class="docutils literal notranslate"><span class="pre">dataset</span></code> (<code class="docutils literal notranslate"><span class="pre">ccflow_etl.DatasetDefinition</span></code>), which supplies the partition key, stores, format, media type and first date; explain results include the dataset’s plan record (<code class="docutils literal notranslate"><span class="pre">key</span></code>, <code class="docutils literal notranslate"><span class="pre">uri</span></code>).</p>
 <p><code class="docutils literal notranslate"><span class="pre">MassiveTickerOverviewBundleExtractModel</span></code> writes one compressed JSONL bundle per date and declares its symbol universe as a graph dependency when it will fetch. <code class="docutils literal notranslate"><span class="pre">ArtifactSymbolUniverseModel</span></code> reads symbols from a stored artifact and accepts an optional <code class="docutils literal notranslate"><span class="pre">source_model</span></code> that produces that artifact; the source model is declared as a dependency and called before the read. A bundle’s overview model can set <code class="docutils literal notranslate"><span class="pre">accepted_status_codes:</span> <span class="pre">[404]</span></code> so tickers that no longer resolve are recorded as <code class="docutils literal notranslate"><span class="pre">not_found</span></code> without raising.</p>
 </section>
 <section id="documentation">
